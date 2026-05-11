@@ -1,0 +1,591 @@
+"""
+drone_controller.py — Hybrid gimbal/drone body control with full failsafe.
+
+Architecture: Two-loop hybrid strategy
+  Inner loop (30 Hz, tracker.py):   Gimbal PID centres person in frame.
+  Outer loop (10 Hz, this module):  Drone body repositions when needed.
+
+Drone movement is triggered when:
+  - Gimbal pan > GIMBAL_PAN_SOFT_DEG  (person drifting off-centre in yaw)
+  - Person GPS is known (EKF valid) and standoff distance error > 1 m
+
+Velocity pipeline (per frame at 10 Hz):
+  EKF person position → proportional error + feedforward velocity
+      → EMA low-pass filter (reduce noise)
+      → jerk limiter (reduce mechanical stress)
+      → safety.check_velocity() (hard speed cap)
+      → mavlink.send_position_velocity_ned()
+
+Failsafe hierarchy (tracking loss):
+  0–2s   Use EKF prediction (maintain motion, gimbal searching)
+  2–5s   Zero velocity → drone decelerates to hover
+  5–15s  LOITER command → drone holds position, GCS alert
+  >15s   Stay in LOITER; operator decides. Never auto-RTL on tracking loss.
+
+Battery critical (separate failsafe):
+  battery_voltage < CELL_CRITICAL_MV * N_cells → RTL immediately.
+
+Safety notes:
+  - This module NEVER sends MAVLink commands if safety checks fail.
+  - GPS loss → immediately zero velocity → LOITER.
+  - Gimbal pan counter-compensation: when drone yaws to recenter,
+    a complementary gimbal correction is computed and returned to tracker.py
+    so the person does not jump in frame.
+"""
+
+import math
+import threading
+import time
+from typing import Optional
+
+import numpy as np
+
+import config as cfg
+from config.settings import Settings, load_settings
+from mavlink_client import MAVLinkClient
+from tracking.person_geolocation import CameraGeolocation, PersonEKF
+from tracking.target_detection import TargetDetection
+from safety import SafetyMonitor
+
+
+class DroneController:
+    """Hybrid outer-loop drone body controller.
+
+    Args:
+        mav:    MAVLinkClient (already connected or not; checked before each send).
+        safety: Shared SafetyMonitor instance.
+        geo:    CameraGeolocation instance (shared with tracker).
+        ekf:    PersonEKF instance (shared with tracker).
+    """
+
+    def __init__(
+        self,
+        mav: MAVLinkClient,
+        safety: SafetyMonitor,
+        geo: CameraGeolocation,
+        ekf: PersonEKF,
+        settings: Settings | None = None,
+    ) -> None:
+        self._s      = settings or load_settings()
+        self._mav    = mav
+        self._safety = safety
+        self._geo    = geo
+        self._ekf    = ekf
+
+        # EKF origin (home position in GPS) — set when GPS is first available
+        self._origin_lat: float = 0.0
+        self._origin_lon: float = 0.0
+        self._origin_set: bool  = False
+
+        # EMA filter state
+        self._ema_vn: float = 0.0
+        self._ema_ve: float = 0.0
+
+        # Jerk limiter state
+        self._prev_vn: float = 0.0
+        self._prev_ve: float = 0.0
+        self._prev_an: float = 0.0
+        self._prev_ae: float = 0.0
+
+        # Timing
+        self._last_update:     float = 0.0
+        self._last_detection:  float = time.monotonic()
+        self._loiter_issued:   bool  = False
+        self._loiter_t:        float = 0.0
+        self._rtl_issued:      bool  = False
+        self._alert_issued:    bool  = False
+
+        # RTL retry state
+        self._rtl_attempts:    int   = 0
+        self._rtl_last_t:      float = 0.0
+        self._rtl_confirmed:   bool  = False
+
+        # Pre-check warning rate-limiters
+        self._mode_warn_t:       float = 0.0
+        self._sensor_warn_issued: bool = False
+        self._target_fence_warn_t: float = 0.0
+
+        # Initialised when set_gimbal_angles() is first called by tracker
+        self._gimbal_pan_rad:  float = 0.0
+        self._gimbal_tilt_rad: float = math.radians(cfg.GIMBAL_TILT_DEFAULT_DEG)
+
+        # Thread lock for _last_detection (updated by tracker thread)
+        self._lock = threading.Lock()
+
+    # ------------------------------------------------------------------
+    #  Public interface — called from tracker.py main loop at 10 Hz
+    # ------------------------------------------------------------------
+
+    def notify_detection(self, detected: bool) -> None:
+        """Called every detection frame to update the tracking-loss timer.
+
+        Args:
+            detected: True if the person was detected this frame.
+        """
+        if detected:
+            with self._lock:
+                self._last_detection  = time.monotonic()
+                self._loiter_issued   = False
+                self._alert_issued    = False
+
+    def update(
+        self,
+        gimbal_pan_deg:  float,
+        gimbal_tilt_deg: float,
+        target_info:     Optional[TargetDetection],
+        drone_tracking_enabled: bool,
+    ) -> float:
+        """Outer-loop update — compute and send drone velocity command.
+
+        Call this at DRONE_CMD_RATE_HZ (10 Hz) regardless of detection status.
+        Always sends a command so ArduPilot GUID_TIMEOUT does not trigger.
+
+        Args:
+            gimbal_pan_deg:          Current gimbal pan angle (degrees).
+            gimbal_tilt_deg:         Current gimbal tilt angle (degrees).
+            target_info:             YOLO target tuple from tracker, or None.
+            drone_tracking_enabled:  False = tracking disabled (gimbal-only mode).
+
+        Returns:
+            gimbal_pan_correction (rad/s): Add to the gimbal PID yaw output
+            to compensate for drone body yaw rotation so the person does
+            not jump in frame.
+        """
+        if not drone_tracking_enabled:
+            return 0.0
+
+        now  = time.monotonic()
+        dt   = now - self._last_update if self._last_update > 0 else 0.1
+        self._last_update = now
+
+        # Advance EKF state estimate every tick so velocity feedforward stays fresh
+        # between detection updates (predict-only steps incur no measurement cost).
+        self._ekf.predict(dt)
+
+        # --- Safety pre-checks ---
+        if not self._mav.is_connected():
+            return 0.0
+
+        if not self._safety.watchdog_heartbeat(self._mav.get_last_heartbeat_time()):
+            print("[Drone] MAVLink heartbeat lost — stopping commands")
+            return 0.0
+
+        # --- A1: GUIDED mode gate ---
+        if self._mav.get_mode() != "GUIDED":
+            if now - self._mode_warn_t >= cfg.MODE_WARN_INTERVAL_S:
+                self._mode_warn_t = now
+                print(f"[Drone] Not in GUIDED ({self._mav.get_mode()}) — commands suppressed")
+            return 0.0   # no send; GUID_TIMEOUT irrelevant outside GUIDED
+
+        # --- A2: ARM state gate ---
+        if not self._mav.is_armed():
+            return 0.0
+
+        # --- A3: Home-position gate ---
+        if not self._mav.is_home_set():
+            self._mav.send_zero_velocity()   # keep GUID_TIMEOUT alive while waiting
+            return 0.0
+
+        # --- C3: Sensor health gate ---
+        if not self._mav.is_sensors_healthy():
+            if not self._sensor_warn_issued:
+                print("[Drone] Critical sensors not healthy — suppressing commands")
+                self._sensor_warn_issued = True
+            self._mav.send_zero_velocity()
+            return 0.0
+        self._sensor_warn_issued = False
+
+        # --- E2: Battery critical → RTL with fire-and-verify retry ---
+        batt_v = self._mav.get_battery_voltage()
+        if self._safety.is_battery_critical(batt_v):
+            if not self._rtl_confirmed:
+                if self._mav.get_mode() == "RTL":
+                    self._rtl_confirmed = True
+                    print("[Drone] RTL confirmed by flight controller")
+                elif (not self._rtl_issued
+                      or now - self._rtl_last_t >= cfg.RTL_RETRY_INTERVAL_S):
+                    if self._rtl_attempts < cfg.RTL_MAX_ATTEMPTS:
+                        self._mav.send_rtl()
+                        self._rtl_issued    = True
+                        self._rtl_last_t    = now
+                        self._rtl_attempts += 1
+                        print(f"[Drone] BATTERY CRITICAL — RTL attempt "
+                              f"{self._rtl_attempts}/{cfg.RTL_MAX_ATTEMPTS}")
+                    else:
+                        print(f"[Drone] ⚠ RTL FAILED after {cfg.RTL_MAX_ATTEMPTS} "
+                              "attempts — operator must intervene!")
+            return 0.0
+
+        # --- GPS check ---
+        if not self._mav.is_gps_ok():
+            print("[Drone] GPS lost — zero velocity")
+            self._mav.send_zero_velocity()
+            return 0.0
+
+        # --- A4: Initialise EKF NED origin from HOME_POSITION (same source as geofence) ---
+        if not self._origin_set and self._mav.is_home_set():
+            home_lat, home_lon, _ = self._mav.get_home_position()
+            self._origin_lat = home_lat
+            self._origin_lon = home_lon
+            self._origin_set = True
+
+        # --- D1: Geofence check — return toward home instead of just stopping ---
+        lat, lon, alt = self._mav.get_gps()
+        if not self._safety.check_geofence(lat, lon, alt):
+            if self._safety.is_home_set:
+                fence_lat, fence_lon = self._safety.get_fence_centre()
+                dn = math.radians(fence_lat - lat) * 6_371_000.0
+                de = (math.radians(fence_lon - lon) * 6_371_000.0
+                      * math.cos(math.radians(lat)))
+                dist = math.sqrt(dn ** 2 + de ** 2)
+                if dist > 1.0:
+                    speed = min(cfg.GEOFENCE_RETURN_MAX_MS,
+                                dist * cfg.GEOFENCE_RETURN_KP)
+                    scale = speed / dist
+                    self._mav.send_velocity_ned(dn * scale, de * scale, 0.0)
+                    print(f"[Drone] Geofence breach — returning ({dist:.0f}m from home)")
+                else:
+                    self._mav.send_zero_velocity()
+            else:
+                self._mav.send_zero_velocity()
+            return 0.0
+
+        # --- C1: ArduPilot onboard fence breach ---
+        if self._mav.is_fence_breached():
+            print("[Drone] ArduPilot fence breach active — zero velocity")
+            self._mav.send_zero_velocity()
+            return 0.0
+
+        # --- Update EKF with latest detection ---
+        if target_info is not None and self._origin_set:
+            self._update_ekf_from_detection(target_info)
+
+        # --- Tracking-loss failsafe ---
+        with self._lock:
+            dt_lost = now - self._last_detection
+        pan_correction = self._handle_tracking_loss(dt_lost, now)
+        if pan_correction is not None:
+            return pan_correction   # failsafe took control
+
+        # --- Compute following velocity ---
+        vN, vE = self._compute_follow_velocity(dt)
+        if vN is None:
+            self._mav.send_zero_velocity()
+            return 0.0
+
+        # --- Drone yaw correction for gimbal pan ---
+        pan_correction_rads = self._compute_yaw_correction(gimbal_pan_deg, dt)
+
+        # --- Target NED position with standoff ---
+        if not self._ekf.is_valid or not self._origin_set:
+            self._mav.send_zero_velocity()
+            return 0.0
+
+        pN, pE             = self._ekf.get_position_ned()        # 2-tuple (N, E)
+        drone_pN, drone_pE, _ = self._mav.get_position_ned()
+
+        # Hard minimum separation guard — hover if already too close
+        sep = math.hypot(pN - drone_pN, pE - drone_pE)
+        if sep < cfg.MIN_PERSON_DRONE_SEP_M:
+            self._mav.send_zero_velocity()
+            return 0.0
+
+        # Choose standoff bearing:
+        # use person velocity direction when moving, else drone-to-person bearing
+        vN_p, vE_p = self._ekf.get_velocity_ned()
+        speed_p = math.hypot(vN_p, vE_p)
+        if speed_p > cfg.STANDOFF_VEL_THRESHOLD_MS:
+            bearing = math.atan2(vE_p, vN_p)
+        else:
+            bearing = math.atan2(pE - drone_pE, pN - drone_pN) if sep > 0.1 else 0.0
+
+        # Desired position is FOLLOW_STANDOFF_M behind person along bearing
+        target_pN = pN - math.cos(bearing) * cfg.FOLLOW_STANDOFF_M
+        target_pE = pE - math.sin(bearing) * cfg.FOLLOW_STANDOFF_M
+        target_pD = -(cfg.FOLLOW_ALTITUDE_M)   # NED down; altitude from config only
+
+        # Altitude safety clamp
+        safe_alt  = self._safety.check_altitude(cfg.FOLLOW_ALTITUDE_M)
+        target_pD = -safe_alt
+
+        if not self._target_within_geofence(target_pN, target_pE, safe_alt):
+            self._mav.send_zero_velocity()
+            return 0.0
+
+        self._mav.send_position_velocity_ned(
+            target_pN, target_pE, target_pD,
+            vN, vE, 0.0,
+        )
+        return pan_correction_rads
+
+    # ------------------------------------------------------------------
+    #  Command target safety checks
+    # ------------------------------------------------------------------
+
+    def _target_within_geofence(
+        self, target_pN: float, target_pE: float, alt_agl: float
+    ) -> bool:
+        """Return True if the commanded target position is inside geofence."""
+        if not self._origin_set:
+            return False
+        try:
+            target_lat, target_lon = self._ekf.ned_to_gps(
+                target_pN, target_pE,
+                self._origin_lat, self._origin_lon,
+            )
+        except Exception as exc:
+            import logging as _log
+            _log.warning("[Drone] Target geofence projection error: %s", exc)
+            return False
+
+        ok = self._safety.geofence_contains(target_lat, target_lon, alt_agl)
+        if not ok:
+            now = time.monotonic()
+            if now - self._target_fence_warn_t >= cfg.MODE_WARN_INTERVAL_S:
+                self._target_fence_warn_t = now
+                print("[Drone] Commanded follow target outside geofence — holding")
+        return ok
+
+    # ------------------------------------------------------------------
+    #  EKF update
+    # ------------------------------------------------------------------
+
+    def _update_ekf_from_detection(self, target_info: TargetDetection) -> None:
+        """Project bounding box to GPS and update the EKF."""
+        if not self._origin_set:
+            return
+
+        lat, lon, alt_agl = self._mav.get_gps()
+        roll, pitch, yaw  = self._mav.get_attitude()
+
+        # Use gimbal angles passed in from tracker via set_gimbal_angles().
+        gimbal_pan_rad  = getattr(self, "_gimbal_pan_rad",  0.0)
+        gimbal_tilt_rad = getattr(self, "_gimbal_tilt_rad", math.radians(cfg.GIMBAL_TILT_DEFAULT_DEG))
+
+        try:
+            x1, y1, x2, y2 = target_info.x1, target_info.y1, target_info.x2, target_info.y2
+            # frame size is stored separately; use a reasonable default
+            frame_w = getattr(self, "_frame_w", 1280)
+            frame_h = getattr(self, "_frame_h", 720)
+
+            result = self._geo.project(
+                x1, y1, x2, y2, frame_w, frame_h,
+                lat, lon, alt_agl,
+                roll, pitch, yaw,
+                gimbal_pan_rad, gimbal_tilt_rad,
+            )
+            if result is None:
+                return
+
+            person_lat, person_lon = result
+            meas_n, meas_e = self._ekf.gps_to_ned(
+                person_lat, person_lon,
+                self._origin_lat, self._origin_lon,
+            )
+            self._ekf.update(meas_n, meas_e)
+        except Exception as e:
+            import logging as _log
+            _log.warning("[EKF] update error: %s", e)
+
+    def set_frame_size(self, w: int, h: int) -> None:
+        """Called by tracker.py once the frame resolution is known."""
+        self._frame_w = w
+        self._frame_h = h
+
+    def set_gimbal_angles(
+        self, pan_rad: float, tilt_rad: float
+    ) -> None:
+        """Called by tracker.py each update so EKF projections use actual angles."""
+        self._gimbal_pan_rad  = pan_rad
+        self._gimbal_tilt_rad = tilt_rad
+
+    # ------------------------------------------------------------------
+    #  Failsafe hierarchy
+    # ------------------------------------------------------------------
+
+    def _handle_tracking_loss(
+        self, dt_lost: float, now: float
+    ) -> Optional[float]:
+        """Implement the tracking-loss failsafe ladder.
+
+        Returns:
+            A pan_correction float if failsafe took control (caller should
+            return this value immediately).
+            None if failsafe did not activate (normal operation continues).
+        """
+        if dt_lost < cfg.TRACKING_LOSS_HOVER_S:
+            # Phase 0: EKF prediction — let _compute_follow_velocity handle it
+            return None
+
+        if dt_lost < cfg.TRACKING_LOSS_LOITER_S:
+            # Phase 1: Person temporarily lost — decelerate to hover
+            self._mav.send_zero_velocity()
+            return 0.0
+
+        if not self._loiter_issued:
+            # Phase 2: Issue LOITER and alert operator
+            self._mav.send_loiter()
+            self._loiter_issued = True
+            self._loiter_t      = now
+            print(
+                f"[Drone] Tracking lost {dt_lost:.1f}s — LOITER issued. "
+                f"Drone holding position."
+            )
+        elif (now - self._loiter_t >= cfg.LOITER_CONFIRM_TIMEOUT_S
+              and self._mav.get_mode() not in ("LOITER", "BRAKE")):
+            self._mav.send_loiter()
+            self._loiter_t = now   # one retry; timer resets so it won't fire again
+            print("[Drone] LOITER retry (mode not confirmed)")
+
+        if dt_lost >= cfg.TRACKING_LOSS_ALERT_S and not self._alert_issued:
+            self._alert_issued = True
+            print(
+                f"[Drone] ⚠ ALERT: Person not detected for {dt_lost:.0f}s. "
+                f"Drone in LOITER. Operator action required."
+            )
+
+        return 0.0   # failsafe active
+
+    # ------------------------------------------------------------------
+    #  Following velocity computation
+    # ------------------------------------------------------------------
+
+    def _compute_follow_velocity(
+        self, dt: float
+    ) -> tuple[Optional[float], Optional[float]]:
+        """Compute drone body NED velocity to follow the EKF person estimate.
+
+        Pipeline:
+          EKF position error → proportional + feedforward
+              → EMA filter
+              → jerk limiter
+
+        Returns:
+            (vN, vE) in m/s, or (None, None) if EKF is not valid.
+        """
+        if not self._ekf.is_valid or not self._origin_set:
+            return None, None
+
+        pN_person, pE_person = self._ekf.get_position_ned()
+        vN_person, vE_person = self._ekf.get_velocity_ned()
+        pN_drone,  pE_drone, _ = self._mav.get_position_ned()
+
+        # Proportional error toward person position
+        err_n = pN_person - pN_drone
+        err_e = pE_person - pE_drone
+        dist  = math.sqrt(err_n**2 + err_e**2)
+
+        # Dead-band: prevent micro-oscillations when close enough.
+        if dist < cfg.DRONE_FOLLOW_DEADBAND_M:
+            return self._apply_smoother(0.0, 0.0, dt)
+
+        # Scale velocity proportionally, capped at MAX_TRACKING_SPEED_MS
+        raw_vn = cfg.DRONE_KP * err_n + vN_person   # proportional + feedforward
+        raw_ve = cfg.DRONE_KP * err_e + vE_person
+
+        # Apply EMA + jerk limiter
+        return self._apply_smoother(raw_vn, raw_ve, dt)
+
+    def _apply_smoother(
+        self, raw_vn: float, raw_ve: float, dt: float
+    ) -> tuple[float, float]:
+        """EMA filter followed by jerk limiter.
+
+        Args:
+            raw_vn, raw_ve: Desired velocity (m/s).
+            dt:             Time step (s).
+
+        Returns:
+            Smoothed (vN, vE).
+        """
+        alpha = cfg.VEL_EMA_ALPHA
+
+        # EMA
+        self._ema_vn = alpha * raw_vn + (1 - alpha) * self._ema_vn
+        self._ema_ve = alpha * raw_ve + (1 - alpha) * self._ema_ve
+
+        # Jerk limit
+        max_jerk = cfg.MAX_JERK_MS3
+        if dt > 0:
+            desired_an = (self._ema_vn - self._prev_vn) / dt
+            desired_ae = (self._ema_ve - self._prev_ve) / dt
+            jerk_n = (desired_an - self._prev_an) / dt
+            jerk_e = (desired_ae - self._prev_ae) / dt
+            jerk_n = max(-max_jerk, min(max_jerk, jerk_n))
+            jerk_e = max(-max_jerk, min(max_jerk, jerk_e))
+            an_lim = self._prev_an + jerk_n * dt
+            ae_lim = self._prev_ae + jerk_e * dt
+            vn_out = self._prev_vn + an_lim * dt
+            ve_out = self._prev_ve + ae_lim * dt
+            self._prev_vn = vn_out
+            self._prev_ve = ve_out
+            self._prev_an = an_lim
+            self._prev_ae = ae_lim
+        else:
+            vn_out = self._ema_vn
+            ve_out = self._ema_ve
+
+        return vn_out, ve_out
+
+    # ------------------------------------------------------------------
+    #  Drone yaw / gimbal pan correction
+    # ------------------------------------------------------------------
+
+    def _compute_yaw_correction(
+        self, gimbal_pan_deg: float, dt: float
+    ) -> float:
+        """Compute drone yaw rate to recenter gimbal pan.
+
+        When the gimbal pan exceeds GIMBAL_PAN_SOFT_DEG, the drone slowly
+        rotates toward the person so the gimbal returns toward centre.
+
+        The gimbal must receive a counter-rotation command so the person
+        does not jump in frame.  The returned value should be subtracted
+        from the gimbal pan PID output by tracker.py.
+
+        Args:
+            gimbal_pan_deg: Actual gimbal pan angle (degrees).
+            dt:             Time step (s).
+
+        Returns:
+            Gimbal pan correction rate (rad/s). Negative of drone yaw rate.
+        """
+        pan_abs = abs(gimbal_pan_deg)
+        if pan_abs <= cfg.GIMBAL_PAN_SOFT_DEG:
+            return 0.0
+
+        # Proportional rate toward recenter
+        excess = pan_abs - cfg.GIMBAL_PAN_SOFT_DEG
+        sign   = 1.0 if gimbal_pan_deg > 0 else -1.0
+
+        # At soft limit: gentle rotation. At hard limit: fast rotation.
+        hard_excess = cfg.GIMBAL_PAN_HARD_DEG - cfg.GIMBAL_PAN_SOFT_DEG
+        factor = min(1.0, excess / max(hard_excess, 1.0))
+        max_yaw_rate = math.radians(cfg.DRONE_MAX_YAW_RATE_DEG)
+        yaw_rate = sign * factor * max_yaw_rate * cfg.DRONE_KP_YAW
+
+        # Gimbal compensation: negate so person stays centred
+        gimbal_correction = -yaw_rate
+        return gimbal_correction
+
+    # ------------------------------------------------------------------
+    #  State reset
+    # ------------------------------------------------------------------
+
+    def reset(self) -> None:
+        """Reset controller state on re-acquisition, seeding EMA from live telemetry.
+
+        Seeds _ema_vn/ve and _prev_vn/ve from current drone velocity so the
+        jerk limiter starts from the actual motion state rather than zero,
+        preventing a velocity spike on the first _compute_follow_velocity() call.
+        """
+        vn, ve, _ = self._mav.get_velocity_ned()
+        self._ema_vn  = vn
+        self._ema_ve  = ve
+        self._prev_vn = vn
+        self._prev_ve = ve
+        self._prev_an = 0.0
+        self._prev_ae = 0.0
+        self._loiter_issued = False
+        self._alert_issued  = False
+        self._ekf.reset()

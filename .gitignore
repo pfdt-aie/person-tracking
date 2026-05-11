@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Runtime output
+logs/
+recordings/
+*.log
+debug_frame_*.jpg
+gpu_frame_*.jpg
+
+# Local machine config
+.env
+.env.*
+
+# Model/build artifacts
+*.engine.tmp
+*.onnx.tmp
+

@@ -1,0 +1,11 @@
+# Core runtime dependencies.
+# On Jetson, install PyTorch/TorchVision using NVIDIA/JetPack-specific wheels
+# before installing Ultralytics; generic PyPI torch wheels may not expose CUDA.
+numpy
+opencv-python
+ultralytics
+pymavlink
+
+# Test tooling
+pytest
+
