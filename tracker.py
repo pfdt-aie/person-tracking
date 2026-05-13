@@ -42,6 +42,7 @@ from mission.hud_renderer import HudRenderer
 from mission.recording_manager import RecordingManager
 from mission.stream_adapter import StreamAdapter
 from safety import SafetyMonitor
+from safety.preflight import PreflightCheck
 from tracking.gimbal_state_machine import GimbalStateMachine
 from tracking.operator_input import OperatorInputController
 from tracking.person_geolocation import CameraGeolocation, PersonEKF
@@ -118,6 +119,14 @@ class PersonGimbalTracker:
 
         self.drone_ctrl = DroneController(
             mav=self.mav, safety=self.safety, geo=self.geo, ekf=self.ekf, settings=self._s
+        )
+
+        # S1.3 — preflight check provider for the web UI checklist.
+        from mavlink_client import ParamVerifier   # local import: keeps gimbal-only paths clean
+        self.preflight = PreflightCheck(
+            mav=self.mav, safety=self.safety,
+            ground_test=getattr(self._s, "ground_test", False),
+            param_verifier=ParamVerifier(self.mav),
         )
 
         # --- Persistent person re-identification ---
@@ -308,6 +317,141 @@ class PersonGimbalTracker:
         print("[Mode] ═══════════════════════════════════════════")
 
     # ------------------------------------------------------------------
+    #  Software E-STOP  (S1.1)
+    # ------------------------------------------------------------------
+
+    def _handle_estop(self, action: str) -> dict:
+        """Execute the operator-triggered E-STOP.
+
+        action: "brake" on first press; "land" on a double-tap within
+                _ESTOP_DOUBLE_TAP_S of a prior press.
+
+        Always stops the autonomous tracker, regardless of MAVLink state,
+        so the gimbal stops chasing even if the FCU is unreachable.
+        Returns a dict echoed back to the browser.
+        """
+        from utils.flight_log import get_flight_log
+        get_flight_log().event("estop", action=action,
+                               drone_enabled=self._drone_enabled)
+        try:
+            self._ts.tracking_enabled = False
+            self.drone_ctrl.reset()
+        except Exception as exc:
+            print(f"[ESTOP] tracker reset error: {exc}")
+
+        if not self._drone_enabled or not self.mav.is_connected():
+            msg = "MAVLink not connected — tracker disabled but FCU unreachable"
+            print(f"[ESTOP] {msg}")
+            return {"status": "error", "action": action, "msg": msg}
+
+        ok = self.mav.send_brake() if action == "brake" else self.mav.send_land()
+        if not ok and action == "brake":
+            print("[ESTOP] BRAKE not ACKed — falling back to LAND")
+            ok = self.mav.send_land()
+            action = "land"
+        return {
+            "status": "ok" if ok else "error",
+            "action": action,
+            "msg": "" if ok else f"FCU did not ACK {action.upper()}",
+        }
+
+    # ------------------------------------------------------------------
+    #  Preflight + arm  (S1.3)
+    # ------------------------------------------------------------------
+
+    def _handle_preflight(self) -> list:
+        """Return the live preflight checklist as a list of dicts."""
+        return [item.to_dict() for item in self.preflight.run()]
+
+    def _handle_arm(self, on) -> dict:
+        """Arm or disarm the drone-body tracker.
+
+        Args:
+            on: True to arm, False to disarm, None to query current state.
+
+        Returns:
+            {"armed": bool, "status": "ok"|"error", "msg": str, "items": [...]}.
+            Refuses to arm if any preflight item is failing or --drone was
+            not specified at launch.
+        """
+        if on is None:
+            return {"armed": bool(self._ts.drone_armed), "status": "ok", "msg": ""}
+
+        if not on:
+            self._ts.drone_armed = False
+            print("[Arm] Drone-body tracker DISARMED by operator")
+            from utils.flight_log import get_flight_log
+            get_flight_log().event("disarm")
+            return {"armed": False, "status": "ok", "msg": "disarmed"}
+
+        if not self._drone_enabled:
+            return {"armed": False, "status": "error",
+                    "msg": "tracker launched without --drone"}
+
+        items = self.preflight.run()
+        if not all(c.ok for c in items):
+            failing = ", ".join(c.name for c in items if not c.ok)
+            return {"armed": False, "status": "error",
+                    "msg": f"preflight failing: {failing}",
+                    "items": [c.to_dict() for c in items]}
+
+        # Successful arm clears the RC-override latch (S3.6) so the controller
+        # can resume issuing commands.
+        self.mav.clear_rc_override()
+        self._ts.drone_armed = True
+        print("[Arm] Drone-body tracker ARMED — preflight all green")
+        from utils.flight_log import get_flight_log
+        get_flight_log().event("arm", checks_passed=len(items))
+        return {"armed": True, "status": "ok", "msg": "armed",
+                "items": [c.to_dict() for c in items]}
+
+    # ------------------------------------------------------------------
+    #  Live telemetry (S3.1)
+    # ------------------------------------------------------------------
+
+    def _handle_telemetry(self) -> dict:
+        """Return live failsafe + flight telemetry for the /status payload.
+
+        All fields are best-effort; missing data is returned as None so the
+        web UI can render a stable layout regardless of subsystem readiness.
+        """
+        import time as _t
+        out: dict = {
+            "drone_enabled": bool(self._drone_enabled),
+            "drone_armed":   bool(self._ts.drone_armed),
+            "mode_tracker":  str(self._ts.mode),
+        }
+        try:
+            if self._drone_enabled and self.mav is not None:
+                out["mavlink"]     = bool(self.mav.is_connected())
+                out["mode_fcu"]    = self.mav.get_mode()
+                out["armed_fcu"]   = bool(self.mav.is_armed())
+                out["gps_fix"]     = int(self.mav.get_gps_fix())
+                out["gps_hdop"]    = round(float(self.mav.get_gps_hdop()), 2)
+                out["gps_sats"]    = int(self.mav.get_sat_count())
+                out["ekf_var"]     = round(
+                    float(self.mav.get_ekf_horizontal_variance()), 3
+                )
+                out["battery_v"]   = round(float(self.mav.get_battery_voltage()), 2)
+                out["fence_breach"] = bool(self.mav.is_fence_breached())
+                out["rc_override"] = bool(self.mav.is_rc_override_active())
+                out["home_set"]    = bool(self.mav.is_home_set())
+                out["sensors_ok"]  = bool(self.mav.is_sensors_healthy())
+                out["ground_test"] = bool(self.mav.is_ground_test())
+        except Exception as exc:
+            out["mavlink_error"] = str(exc)
+
+        try:
+            now = _t.monotonic()
+            last_det = self.drone_ctrl._last_detection
+            out["tracking_loss_s"] = round(now - last_det, 2) if last_det else None
+            out["fps"]             = round(self.drone_ctrl.effective_fps(), 1)
+            out["body_confirmed"]  = bool(self.drone_ctrl.is_body_confirmed())
+        except Exception:
+            pass
+        return out
+
+    # ------------------------------------------------------------------
     #  Stream / recorder / overlay delegates
     # ------------------------------------------------------------------
 
@@ -369,6 +513,10 @@ class PersonGimbalTracker:
             self.stream.set_zoom_callback(self._web_ctrl.handle_zoom)
             self.stream.set_mode_callback(self._web_ctrl.handle_mode)
             self.stream.set_gimbal_callback(self._web_ctrl.handle_gimbal)
+            self.stream.set_estop_callback(self._handle_estop)
+            self.stream.set_preflight_callback(self._handle_preflight)
+            self.stream.set_arm_callback(self._handle_arm)
+            self.stream.set_telemetry_callback(self._handle_telemetry)
         self._stream_thread = threading.Thread(
             target=self._stream_loop, daemon=True, name="StreamThread")
         self._stream_thread.start()
@@ -500,7 +648,11 @@ class PersonGimbalTracker:
                             gimbal_pan_deg         = self.ctrl.gimbal_pan_deg,
                             gimbal_tilt_deg        = self.ctrl.gimbal_tilt_deg,
                             target_info            = target_info,
-                            drone_tracking_enabled = ts.tracking_enabled and ts.mode == "AUTO",
+                            drone_tracking_enabled = (
+                                ts.tracking_enabled
+                                and ts.drone_armed         # S1.3 preflight gate
+                                and ts.mode == "AUTO"
+                            ),
                         )
                         if pan_correction != 0.0 and ts.state == State.TRACKING:
                             correction_speed = int(pan_correction * (180.0 / math.pi))

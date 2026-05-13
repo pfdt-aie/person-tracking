@@ -30,6 +30,13 @@ class TrackerState:
     tracking_enabled: bool = True
     search_enabled:   bool = True
 
+    # --- S1.3: drone-body arming gate ---
+    # The gimbal can run freely; the drone body must be explicitly armed
+    # by the operator after a passing preflight check. Starts False even
+    # in --drone mode so velocity commands can never go out before the
+    # operator confirms readiness.
+    drone_armed: bool = False
+
     # --- Manual gimbal commands (operator-driven) ---
     manual_yaw_speed:    int   = 0
     manual_pitch_speed:  int   = 0

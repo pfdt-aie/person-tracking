@@ -275,6 +275,19 @@ class PersonEKF:
             self._initialised = True
             return True
 
+        # S2.4 — Euclidean jump rejection. Catches teleport-style errors
+        # (re-ID swap to a different person, projection glitch) BEFORE the
+        # Mahalanobis gate, which can be defeated by inflated covariance
+        # after a long predict-only run.
+        dx = meas_n - float(self._x[0])
+        dy = meas_e - float(self._x[1])
+        jump = math.hypot(dx, dy)
+        if jump > cfg.EKF_MAX_JUMP_M:
+            print(f"[EKF] Position jump rejected: {jump:.1f}m "
+                  f"(limit {cfg.EKF_MAX_JUMP_M:.1f}m) "
+                  f"— possible re-ID swap or projection glitch")
+            return False
+
         # Innovation
         innov = z - self._H @ self._x
         S     = self._H @ self._P @ self._H.T + self._R

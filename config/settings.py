@@ -68,6 +68,15 @@ class Settings:
     cell_critical_mv:     int   = _cfg.CELL_CRITICAL_MV
     default_cells:        int   = _cfg.DEFAULT_CELLS
 
+    # --- Ground-test (S1.2) ---
+    # When True the MAVLinkClient logs every intended TX but never actually
+    # transmits. RX is unaffected so the operator still sees real telemetry.
+    ground_test: bool = False
+
+    # --- Battery cell override (S3.4) ---
+    # 0 = auto-detect from pack voltage. 3–6 = force cell count.
+    cells_override: int = 0
+
     # --- Gimbal telemetry ---
     gimbal_attitude_stale_s: float = _cfg.GIMBAL_ATTITUDE_STALE_S
     gimbal_coast_s:          float = _cfg.GIMBAL_COAST_S

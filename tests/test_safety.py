@@ -122,3 +122,17 @@ def test_watchdog_stale():
     s = _safety()
     stale_t = time.monotonic() - (cfg.HEARTBEAT_WATCHDOG_S + 1.0)
     assert s.watchdog_heartbeat(stale_t) is False
+
+
+def test_watchdog_tightened_to_realistic_floor():
+    # ArduPilot HB = 1 Hz; must allow one missed packet (>1.0 s) but be
+    # substantially tighter than the original 3.0 s.
+    assert cfg.HEARTBEAT_WATCHDOG_S <= 2.5
+    assert cfg.HEARTBEAT_WATCHDOG_S > 1.0
+
+
+def test_watchdog_warn_band_returns_true_but_logs():
+    s = _safety()
+    warn_age = (cfg.HEARTBEAT_WARN_S + cfg.HEARTBEAT_WATCHDOG_S) / 2.0
+    t = time.monotonic() - warn_age
+    assert s.watchdog_heartbeat(t) is True   # still in healthy band

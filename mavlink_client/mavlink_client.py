@@ -101,6 +101,9 @@ class MAVLinkClient:
         self._vbat_mv:      int   = 0      # mV (from SYS_STATUS)
         self._gps_fix:      int   = 0      # fix type (0–6)
         self._n_sats:       int   = 0
+        self._gps_hdop:     float = 99.99  # GPS_RAW_INT eph / 100 (S2.1)
+        self._ekf_pos_var:  float = 0.0    # EKF_STATUS_REPORT pos_horiz_variance (S2.1)
+        self._ekf_status_seen: bool = False  # only enforce var when message received
         self._armed:        bool  = False
         self._mode:         str   = "UNKNOWN"
         self._hb_time:      float = 0.0    # monotonic timestamp of last heartbeat
@@ -120,6 +123,22 @@ class MAVLinkClient:
         # C3: Sensor health from SYS_STATUS
         self._sensors_health:  int = 0
         self._sensors_present: int = 0
+
+        # S2.3: parameter cache populated by PARAM_VALUE messages
+        self._params:        dict[str, float]              = {}
+        self._param_events:  dict[str, threading.Event]    = {}
+        self._param_lock:    threading.Lock                = threading.Lock()
+
+        # S3.6: RC-override latch. Trips when the FCU exits GUIDED (RC pilot
+        # took control, autopilot failsafe, etc.). Cleared only by an
+        # explicit arm-tracker request after preflight passes again.
+        self._rc_override_latched: bool = False
+
+        # S1.2: ground-test (dry-run) mode — when True, no TX is emitted.
+        self._ground_test: bool = bool(getattr(self._s, "ground_test", False))
+        self._ground_test_banner_t: float = 0.0
+        if self._ground_test:
+            print("[MAVLink] GROUND-TEST MODE — all TX suppressed; RX unchanged")
 
     # ------------------------------------------------------------------
     #  Connection lifecycle
@@ -234,9 +253,28 @@ class MAVLinkClient:
                         new_mode = mavutil.mode_string_v10(msg)
                         if new_mode != self._mode and self._mode not in ("UNKNOWN", ""):
                             print(f"[MAVLink] Flight mode: {self._mode} → {new_mode}")
+                            try:
+                                from utils.flight_log import get_flight_log
+                                get_flight_log().event(
+                                    "mode_change",
+                                    prev=self._mode, new=new_mode,
+                                )
+                            except Exception:
+                                pass
                             if self._mode == "GUIDED" and new_mode != "GUIDED":
                                 print("[MAVLink] ⚠ Left GUIDED mode — "
                                       "operator override or failsafe")
+                                # S3.6 — latch RC override. Tracker must
+                                # re-arm explicitly to clear.
+                                self._rc_override_latched = True
+                                try:
+                                    from utils.flight_log import get_flight_log
+                                    get_flight_log().event(
+                                        "rc_override", prev_mode=self._mode,
+                                        new_mode=new_mode,
+                                    )
+                                except Exception:
+                                    pass
                         self._mode = new_mode
 
                     elif t == "ATTITUDE":
@@ -261,6 +299,18 @@ class MAVLinkClient:
                     elif t == "GPS_RAW_INT":
                         self._gps_fix = msg.fix_type
                         self._n_sats  = msg.satellites_visible
+                        # eph is the horizontal-position uncertainty in cm.
+                        # MAVLink encodes "unknown" as 65535. Treat that as
+                        # very bad HDOP so the gate fails closed.
+                        eph = getattr(msg, "eph", 65535)
+                        self._gps_hdop = 99.99 if eph >= 65535 else eph / 100.0
+
+                    elif t == "EKF_STATUS_REPORT":
+                        # Worst-case horizontal variance — combined N/E.
+                        self._ekf_pos_var = float(
+                            getattr(msg, "pos_horiz_variance", 0.0)
+                        )
+                        self._ekf_status_seen = True
 
                     elif t == "SYS_STATUS":
                         self._vbat_mv          = msg.voltage_battery
@@ -288,6 +338,22 @@ class MAVLinkClient:
                         if self._fence_breached:
                             print(f"[MAVLink] ⚠ ArduPilot FENCE BREACH "
                                   f"type={msg.breach_type} count={msg.breach_count}")
+
+                    elif t == "PARAM_VALUE":
+                        # S2.3 — cache the value and wake any fetch_param waiter.
+                        try:
+                            raw_name = msg.param_id
+                            name = (raw_name.decode() if isinstance(raw_name, bytes)
+                                    else str(raw_name)).rstrip("\x00").strip()
+                            value = float(msg.param_value)
+                        except Exception:
+                            name, value = "", 0.0
+                        if name:
+                            with self._param_lock:
+                                self._params[name] = value
+                                ev = self._param_events.get(name)
+                                if ev is not None:
+                                    ev.set()
 
                     elif t == "COMMAND_ACK":
                         cmd_id = msg.command
@@ -321,26 +387,57 @@ class MAVLinkClient:
     # ------------------------------------------------------------------
 
     def _detect_cell_count(self) -> None:
-        """Estimate battery cell count from pack voltage.
+        """Estimate battery cell count from pack voltage (S3.4).
 
-        Uses nominal cell voltage (CELL_NOMINAL_MV) to divide.
-        Valid range: 3–6 cells. Falls back to DEFAULT_CELLS if ambiguous.
+        If --cells N was passed at launch, that override takes priority and
+        the auto-detector is bypassed (logged as confidence=override).
+
+        Otherwise the cell count is the rounded ratio of pack voltage to
+        nominal cell voltage. Confidence reflects how close the actual
+        voltage falls to its rounded multiple:
+
+            high   — within 10 % of nominal*n
+            medium — within 20 %
+            low    — beyond 20 %, or ratio outside the 3–6 envelope
+
+        Falls back to DEFAULT_CELLS on low confidence.
         Must be called with self._lock held.
         """
+        # S3.4 — explicit override always wins.
+        override = int(getattr(self._s, "cells_override", 0))
+        if 3 <= override <= 6:
+            self._cell_count    = override
+            self._cell_detected = True
+            self._safety.set_cell_count(override)
+            print(f"[MAVLink] Battery: cell_count.override n={override}S "
+                  "confidence=override")
+            return
+
         v_mv    = self._vbat_mv
         nominal = cfg.CELL_NOMINAL_MV  # e.g. 3700 mV
+        ratio   = v_mv / nominal
+        estimated = round(ratio)
+        # Distance from nearest integer (0.0 = perfect, 0.5 = ambiguous).
+        delta = abs(ratio - estimated)
+        if delta < 0.1:
+            confidence = "high"
+        elif delta < 0.2:
+            confidence = "medium"
+        else:
+            confidence = "low"
 
-        estimated = round(v_mv / nominal)
-        if 3 <= estimated <= 6:
+        if 3 <= estimated <= 6 and confidence != "low":
             self._cell_count     = estimated
             self._cell_detected  = True
             self._safety.set_cell_count(estimated)
-            print(f"[MAVLink] Battery: {v_mv}mV → detected {estimated}S pack")
+            print(f"[MAVLink] Battery: cell_count.detected n={estimated}S "
+                  f"v_per_cell={v_mv/estimated:.0f}mV confidence={confidence}")
         else:
             print(
-                f"[MAVLink] Battery cell detection inconclusive "
-                f"({v_mv}mV / {nominal}mV = {v_mv/nominal:.1f}) "
-                f"— using default {cfg.DEFAULT_CELLS}S"
+                f"[MAVLink] Battery cell detection ambiguous "
+                f"({v_mv}mV / {nominal}mV = {ratio:.2f}, "
+                f"confidence={confidence}) — using default "
+                f"{cfg.DEFAULT_CELLS}S. Override with --cells N."
             )
 
     # ------------------------------------------------------------------
@@ -382,9 +479,54 @@ class MAVLinkClient:
         with self._lock:
             return self._gps_fix
 
+    def get_gps_hdop(self) -> float:
+        """GPS HDOP from GPS_RAW_INT (eph / 100). 99.99 if unknown."""
+        with self._lock:
+            return self._gps_hdop
+
+    def get_sat_count(self) -> int:
+        """Number of GPS satellites currently visible."""
+        with self._lock:
+            return self._n_sats
+
+    def get_ekf_horizontal_variance(self) -> float:
+        """EKF horizontal position variance from EKF_STATUS_REPORT.
+
+        Returns 0.0 if no report has been received yet (caller should treat
+        the value as informational until is_ekf_status_seen() is True).
+        """
+        with self._lock:
+            return self._ekf_pos_var
+
+    def is_ekf_status_seen(self) -> bool:
+        """True after at least one EKF_STATUS_REPORT has been parsed."""
+        with self._lock:
+            return self._ekf_status_seen
+
     def is_gps_ok(self) -> bool:
-        """Return True if GPS fix meets the minimum requirement."""
-        return self.get_gps_fix() >= cfg.GPS_MIN_FIX_TYPE
+        """Return True if GPS quality is sufficient for autonomous flight (S2.1).
+
+        Combines four checks:
+          - fix_type >= GPS_MIN_FIX_TYPE
+          - HDOP    <= GPS_MAX_HDOP
+          - sats    >= GPS_MIN_SATS
+          - EKF horizontal variance <= EKF_MAX_VARIANCE (when reported)
+        """
+        with self._lock:
+            fix       = self._gps_fix
+            hdop      = self._gps_hdop
+            sats      = self._n_sats
+            ekf_var   = self._ekf_pos_var
+            ekf_seen  = self._ekf_status_seen
+        if fix < cfg.GPS_MIN_FIX_TYPE:
+            return False
+        if hdop > cfg.GPS_MAX_HDOP:
+            return False
+        if sats < cfg.GPS_MIN_SATS:
+            return False
+        if ekf_seen and ekf_var > cfg.EKF_MAX_VARIANCE:
+            return False
+        return True
 
     def is_armed(self) -> bool:
         with self._lock:
@@ -414,6 +556,21 @@ class MAVLinkClient:
         with self._lock:
             return self._fence_breached
 
+    def is_rc_override_active(self) -> bool:
+        """Return True if a GUIDED→other transition has been observed (S3.6).
+
+        Once latched, only an explicit clear_rc_override() releases it.
+        """
+        with self._lock:
+            return self._rc_override_latched
+
+    def clear_rc_override(self) -> None:
+        """Release the RC-override latch (called by /arm_tracker re-arm)."""
+        with self._lock:
+            if self._rc_override_latched:
+                print("[MAVLink] RC override latch cleared (operator re-armed)")
+            self._rc_override_latched = False
+
     def is_sensors_healthy(self) -> bool:
         """True if gyro, accel, mag, and baro all report healthy in SYS_STATUS.
 
@@ -424,6 +581,47 @@ class MAVLinkClient:
             if required == 0:
                 return True   # no SYS_STATUS yet — don't block startup
             return bool((self._sensors_health & required) == required)
+
+    # ------------------------------------------------------------------
+    #  Parameter fetch  (S2.3 — preflight verifier)
+    # ------------------------------------------------------------------
+
+    def fetch_param(self, name: str, timeout: float = 2.0) -> Optional[float]:
+        """Request an ArduPilot parameter and wait for the PARAM_VALUE reply.
+
+        Returns the value on success, None on timeout or transport error.
+        Subsequent calls for the same name return the cached value
+        immediately if the FCU has already published it.
+        """
+        if self._mav is None:
+            return None
+
+        with self._param_lock:
+            if name in self._params:
+                return self._params[name]
+            ev = self._param_events.setdefault(name, threading.Event())
+            ev.clear()
+
+        if self._ground_test:
+            # No TX in dry-run mode — the FCU will never reply. Return whatever
+            # we have cached (None) and let the caller treat as "unknown".
+            return None
+
+        try:
+            self._mav.mav.param_request_read_send(
+                self._mav.target_system,
+                self._mav.target_component,
+                name.encode("ascii"),
+                -1,                        # use name, not index
+            )
+        except Exception as exc:
+            print(f"[MAVLink] param_request_read({name!r}) error: {exc}")
+            return None
+
+        if not ev.wait(timeout):
+            return None
+        with self._param_lock:
+            return self._params.get(name)
 
     # ------------------------------------------------------------------
     #  Mode commands
@@ -444,6 +642,12 @@ class MAVLinkClient:
         """
         if self._mav is None:
             return False
+        if self._ground_test:
+            self._log_ground_test(
+                f"command_long cmd={command} "
+                f"params=({p1:.2f},{p2:.2f},{p3:.2f},{p4:.2f},{p5:.2f},{p6:.2f},{p7:.2f})"
+            )
+            return True   # pretend ACK so callers proceed identically
         ev = threading.Event()
         with self._ack_lock:
             self._ack_events[command] = ev
@@ -550,6 +754,13 @@ class MAVLinkClient:
             print(f"[MAVLink] WARN: Non-finite value in command — discarded "
                   f"pos=({pN:.2f},{pE:.2f},{pD:.2f}) vel=({vN:.2f},{vE:.2f},{vD:.2f})")
             return
+        if self._ground_test:
+            self._log_ground_test(
+                f"pos_target mask=0x{type_mask:04x} "
+                f"pos=({pN:.2f},{pE:.2f},{pD:.2f}) "
+                f"vel=({vN:.2f},{vE:.2f},{vD:.2f})"
+            )
+            return
         try:
             self._mav.mav.set_position_target_local_ned_send(
                 0,                                          # time_boot_ms (unused)
@@ -605,6 +816,61 @@ class MAVLinkClient:
             print("[MAVLink] WARNING: RTL mode not confirmed by autopilot")
         return ok
 
+    def send_brake(self) -> bool:
+        """Switch to BRAKE flight mode (ArduCopter mode 17, ACK-confirmed).
+
+        BRAKE is the aggressive-stop mode used as the first stage of the
+        software E-STOP (S1.1). Drone decelerates to a hover; no further
+        operator action required for steady state.
+        """
+        ok = self.send_command_with_ack(
+            mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+            p1=mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+            p2=17,   # ArduCopter BRAKE mode number
+        )
+        if ok:
+            print("[MAVLink] BRAKE mode confirmed (E-STOP stage 1)")
+        else:
+            print("[MAVLink] WARNING: BRAKE mode not confirmed by autopilot")
+        return ok
+
+    def send_land(self) -> bool:
+        """Switch to LAND flight mode (ArduCopter mode 9, ACK-confirmed).
+
+        Second stage of the software E-STOP (S1.1) — used when the operator
+        double-taps the E-STOP button or BRAKE fails to ACK.
+        """
+        ok = self.send_command_with_ack(
+            mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+            p1=mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+            p2=9,   # ArduCopter LAND mode number
+        )
+        if ok:
+            print("[MAVLink] LAND mode confirmed (E-STOP stage 2)")
+        else:
+            print("[MAVLink] WARNING: LAND mode not confirmed by autopilot")
+        return ok
+
     def send_zero_velocity(self) -> None:
         """Send (0, 0, 0) velocity — graceful deceleration to hover."""
         self.send_velocity_ned(0.0, 0.0, 0.0)
+
+    # ------------------------------------------------------------------
+    #  Ground-test (S1.2)
+    # ------------------------------------------------------------------
+
+    def is_ground_test(self) -> bool:
+        """True when this client is suppressing all MAVLink TX."""
+        return self._ground_test
+
+    def _log_ground_test(self, body: str) -> None:
+        """Log a would-be MAVLink TX in ground-test mode.
+
+        Prints the intended command and re-prints the banner every 5 s so the
+        operator cannot lose track of dry-run state while watching the stream.
+        """
+        now = time.monotonic()
+        if now - self._ground_test_banner_t >= 5.0:
+            print("[MAVLink] ⚠ GROUND-TEST — TX suppressed (no commands sent to FCU)")
+            self._ground_test_banner_t = now
+        print(f"[MAVLink] [DRY-RUN] {body}")

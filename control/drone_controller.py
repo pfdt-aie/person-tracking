@@ -36,9 +36,12 @@ Safety notes:
 import math
 import threading
 import time
+from collections import deque
 from typing import Optional
 
 import numpy as np
+
+from utils.flight_log import get_flight_log
 
 import config as cfg
 from config.settings import Settings, load_settings
@@ -95,6 +98,34 @@ class DroneController:
         self._rtl_issued:      bool  = False
         self._alert_issued:    bool  = False
 
+        # S1.5 — body-movement confirmation counter.  Drone body stays at
+        # zero velocity until BODY_MOVE_CONFIRM_FRAMES consecutive valid
+        # detections.  Gimbal control is independent and tracks immediately.
+        self._confirm_count: int = 0
+
+        # S1.4 — retreat latch.  Once horizontal separation drops below
+        # MIN_PERSON_DRONE_SEP_M, stay retreating until sep exceeds
+        # MIN_PERSON_DRONE_SEP_M + RETREAT_HYSTERESIS_M.  Prevents flutter
+        # at the boundary if the subject is walking toward the drone.
+        self._retreating: bool = False
+
+        # S2.6 — standoff bearing hysteresis.  _vel_above_t is the monotonic
+        # timestamp the person's velocity first crossed STANDOFF_VEL_THRESHOLD_MS
+        # (-1.0 sentinel = below threshold). _bearing_rad is the slew-rate-
+        # limited bearing used for the actual standoff vector.
+        self._vel_above_t: float = -1.0
+        self._bearing_rad: float = 0.0
+        self._bearing_init: bool = False
+
+        # S3.3 — session-time RTL. Timer starts on first armed-enable;
+        # resets when the drone is disarmed (drone_tracking_enabled=False).
+        self._session_start_t: float = -1.0
+        self._session_rtl_issued: bool = False
+
+        # S3.5 — detection frame timestamps for FPS estimation.
+        self._fps_times: deque = deque(maxlen=cfg.FPS_WINDOW_SIZE)
+        self._fps_warned: bool = False
+
         # RTL retry state
         self._rtl_attempts:    int   = 0
         self._rtl_last_t:      float = 0.0
@@ -122,11 +153,35 @@ class DroneController:
         Args:
             detected: True if the person was detected this frame.
         """
-        if detected:
-            with self._lock:
-                self._last_detection  = time.monotonic()
+        now = time.monotonic()
+        with self._lock:
+            self._fps_times.append(now)   # S3.5 — sample for FPS window
+            if detected:
+                self._last_detection  = now
                 self._loiter_issued   = False
                 self._alert_issued    = False
+                if self._confirm_count < cfg.BODY_MOVE_CONFIRM_FRAMES:
+                    self._confirm_count += 1
+            else:
+                self._confirm_count = 0
+
+    def is_body_confirmed(self) -> bool:
+        """True once BODY_MOVE_CONFIRM_FRAMES consecutive detections seen."""
+        with self._lock:
+            return self._confirm_count >= cfg.BODY_MOVE_CONFIRM_FRAMES
+
+    def effective_fps(self) -> float:
+        """Rolling estimate of detection-loop FPS (S3.5).
+
+        Returns 0.0 until at least 2 samples are present so callers can
+        decide whether the answer is meaningful yet.
+        """
+        with self._lock:
+            if len(self._fps_times) < 2:
+                return 0.0
+            window = self._fps_times[-1] - self._fps_times[0]
+            n = len(self._fps_times) - 1
+        return n / window if window > 0 else 0.0
 
     def update(
         self,
@@ -152,11 +207,31 @@ class DroneController:
             not jump in frame.
         """
         if not drone_tracking_enabled:
+            # S3.3 — reset the session timer the moment the operator disarms.
+            self._session_start_t   = -1.0
+            self._session_rtl_issued = False
             return 0.0
 
         now  = time.monotonic()
         dt   = now - self._last_update if self._last_update > 0 else 0.1
         self._last_update = now
+
+        # S3.3 — session-time RTL. Caps the autonomous-tracking session at
+        # MAX_FLIGHT_TIME_S so a forgotten run can never exceed safe battery.
+        if self._session_start_t < 0:
+            self._session_start_t = now
+        if (now - self._session_start_t) >= cfg.MAX_FLIGHT_TIME_S:
+            if not self._session_rtl_issued:
+                print(f"[Drone] Session time {cfg.MAX_FLIGHT_TIME_S:.0f}s reached "
+                      "— issuing RTL")
+                get_flight_log().event(
+                    "session_rtl",
+                    elapsed_s=now - self._session_start_t,
+                    limit_s=cfg.MAX_FLIGHT_TIME_S,
+                )
+                self._mav.send_rtl()
+                self._session_rtl_issued = True
+            return 0.0
 
         # Advance EKF state estimate every tick so velocity feedforward stays fresh
         # between detection updates (predict-only steps incur no measurement cost).
@@ -176,6 +251,13 @@ class DroneController:
                 self._mode_warn_t = now
                 print(f"[Drone] Not in GUIDED ({self._mav.get_mode()}) — commands suppressed")
             return 0.0   # no send; GUID_TIMEOUT irrelevant outside GUIDED
+
+        # --- S3.6: RC-override latch ---
+        if self._mav.is_rc_override_active():
+            if now - self._mode_warn_t >= cfg.MODE_WARN_INTERVAL_S:
+                self._mode_warn_t = now
+                print("[Drone] RC override latched — re-arm tracker to resume")
+            return 0.0
 
         # --- A2: ARM state gate ---
         if not self._mav.is_armed():
@@ -267,6 +349,37 @@ class DroneController:
         if pan_correction is not None:
             return pan_correction   # failsafe took control
 
+        # --- S3.5: FPS floor ---
+        # Once we have enough samples, hold the body if the detector loop
+        # is too slow to drive commands safely. Gimbal continues tracking.
+        fps = self.effective_fps()
+        if fps > 0.0 and fps < cfg.MIN_TRACKING_FPS:
+            if not self._fps_warned:
+                print(f"[Drone] Detection FPS {fps:.1f} < "
+                      f"{cfg.MIN_TRACKING_FPS:.1f} — body holding")
+                get_flight_log().event(
+                    "fps_floor", fps=fps, threshold=cfg.MIN_TRACKING_FPS,
+                    state="hold",
+                )
+                self._fps_warned = True
+            self._mav.send_zero_velocity()
+            return 0.0
+        elif fps >= cfg.MIN_TRACKING_FPS and self._fps_warned:
+            print(f"[Drone] Detection FPS recovered ({fps:.1f}) — body resuming")
+            get_flight_log().event(
+                "fps_floor", fps=fps, threshold=cfg.MIN_TRACKING_FPS,
+                state="resume",
+            )
+            self._fps_warned = False
+
+        # --- S1.5: Body-movement confirmation gate ---
+        # Require BODY_MOVE_CONFIRM_FRAMES consecutive detections before
+        # any drone body velocity is sent. Holds hover otherwise. Gimbal
+        # tracking is unaffected (handled by tracker.py).
+        if not self.is_body_confirmed():
+            self._mav.send_zero_velocity()
+            return 0.0
+
         # --- Compute following velocity ---
         vN, vE = self._compute_follow_velocity(dt)
         if vN is None:
@@ -284,20 +397,27 @@ class DroneController:
         pN, pE             = self._ekf.get_position_ned()        # 2-tuple (N, E)
         drone_pN, drone_pE, _ = self._mav.get_position_ned()
 
-        # Hard minimum separation guard — hover if already too close
+        # S1.4 — Hard separation guard with active retreat + hysteresis.
         sep = math.hypot(pN - drone_pN, pE - drone_pE)
-        if sep < cfg.MIN_PERSON_DRONE_SEP_M:
-            self._mav.send_zero_velocity()
+        if self._should_retreat(sep):
+            self._send_retreat_velocity(pN, pE, drone_pN, drone_pE, sep)
             return 0.0
 
-        # Choose standoff bearing:
-        # use person velocity direction when moving, else drone-to-person bearing
+        # S1.4 — Vertical separation guard.  Uses drone AGL altitude as the
+        # vertical clearance above the subject (assumes flat ground at home
+        # altitude; safe-conservative on hills since alt_agl > true clearance).
+        alt_agl = self._mav.get_altitude_agl()
+        if alt_agl < cfg.MIN_VERTICAL_SEP_M:
+            self._mav.send_velocity_ned(0.0, 0.0, -cfg.RETREAT_SPEED_MS)  # vD<0 = climb
+            return 0.0
+
+        # S2.6 — Standoff bearing with hysteresis + slew-rate limit.
         vN_p, vE_p = self._ekf.get_velocity_ned()
-        speed_p = math.hypot(vN_p, vE_p)
-        if speed_p > cfg.STANDOFF_VEL_THRESHOLD_MS:
-            bearing = math.atan2(vE_p, vN_p)
-        else:
-            bearing = math.atan2(pE - drone_pE, pN - drone_pN) if sep > 0.1 else 0.0
+        bearing = self._update_bearing(
+            pN=pN, pE=pE,
+            drone_pN=drone_pN, drone_pE=drone_pE, sep=sep,
+            vN_p=vN_p, vE_p=vE_p, now=now, dt=dt,
+        )
 
         # Desired position is FOLLOW_STANDOFF_M behind person along bearing
         target_pN = pN - math.cos(bearing) * cfg.FOLLOW_STANDOFF_M
@@ -312,6 +432,12 @@ class DroneController:
             self._mav.send_zero_velocity()
             return 0.0
 
+        # S2.2 — HOME keep-out. Refuse targets that would put the airframe
+        # on top of the operator standing at HOME.
+        if not self._safety.check_home_keepout(target_pN, target_pE):
+            self._mav.send_zero_velocity()
+            return 0.0
+
         self._mav.send_position_velocity_ned(
             target_pN, target_pE, target_pD,
             vN, vE, 0.0,
@@ -321,6 +447,80 @@ class DroneController:
     # ------------------------------------------------------------------
     #  Command target safety checks
     # ------------------------------------------------------------------
+
+    def _update_bearing(
+        self,
+        pN: float, pE: float,
+        drone_pN: float, drone_pE: float, sep: float,
+        vN_p: float, vE_p: float,
+        now: float, dt: float,
+    ) -> float:
+        """Compute the slew-rate-limited standoff bearing (S2.6).
+
+        Uses person velocity direction once velocity has been continuously
+        above STANDOFF_VEL_THRESHOLD_MS for at least BEARING_LATCH_S;
+        otherwise uses the drone→person line. Output is rate-limited by
+        BEARING_SLEW_DEG_S so the target NED point can never teleport.
+        """
+        speed_p = math.hypot(vN_p, vE_p)
+        if speed_p > cfg.STANDOFF_VEL_THRESHOLD_MS:
+            if self._vel_above_t < 0.0:
+                self._vel_above_t = now
+            sustained = (now - self._vel_above_t) >= cfg.BEARING_LATCH_S
+        else:
+            self._vel_above_t = -1.0
+            sustained = False
+
+        if sustained:
+            desired = math.atan2(vE_p, vN_p)
+        elif sep > 0.1:
+            desired = math.atan2(pE - drone_pE, pN - drone_pN)
+        else:
+            desired = self._bearing_rad if self._bearing_init else 0.0
+
+        if not self._bearing_init:
+            self._bearing_rad = desired
+            self._bearing_init = True
+            return desired
+
+        # Shortest signed angular difference, clamped to slew limit.
+        diff = (desired - self._bearing_rad + math.pi) % (2 * math.pi) - math.pi
+        max_step = math.radians(cfg.BEARING_SLEW_DEG_S) * max(dt, 1e-3)
+        step = max(-max_step, min(max_step, diff))
+        self._bearing_rad += step
+        # Normalise into (-π, π]
+        if self._bearing_rad > math.pi:
+            self._bearing_rad -= 2 * math.pi
+        elif self._bearing_rad <= -math.pi:
+            self._bearing_rad += 2 * math.pi
+        return self._bearing_rad
+
+    def _should_retreat(self, sep: float) -> bool:
+        """Latch retreat with hysteresis on horizontal separation."""
+        if sep < cfg.MIN_PERSON_DRONE_SEP_M:
+            self._retreating = True
+        elif sep > cfg.MIN_PERSON_DRONE_SEP_M + cfg.RETREAT_HYSTERESIS_M:
+            self._retreating = False
+        return self._retreating
+
+    def _send_retreat_velocity(
+        self,
+        pN: float, pE: float,
+        drone_pN: float, drone_pE: float,
+        sep: float,
+    ) -> None:
+        """Command a constant-speed vector pointing away from the subject."""
+        if sep < 0.01:
+            # Degenerate case (drone exactly on subject) — climb instead.
+            self._mav.send_velocity_ned(0.0, 0.0, -cfg.RETREAT_SPEED_MS)
+            return
+        away_n = (drone_pN - pN) / sep
+        away_e = (drone_pE - pE) / sep
+        self._mav.send_velocity_ned(
+            away_n * cfg.RETREAT_SPEED_MS,
+            away_e * cfg.RETREAT_SPEED_MS,
+            0.0,
+        )
 
     def _target_within_geofence(
         self, target_pN: float, target_pE: float, alt_agl: float
@@ -515,6 +715,11 @@ class DroneController:
             jerk_e = max(-max_jerk, min(max_jerk, jerk_e))
             an_lim = self._prev_an + jerk_n * dt
             ae_lim = self._prev_ae + jerk_e * dt
+
+            # S2.5 — hard acceleration cap. Magnitude-preserving clamp so the
+            # commanded acceleration vector keeps the same direction.
+            an_lim, ae_lim = self._clamp_accel(an_lim, ae_lim)
+
             vn_out = self._prev_vn + an_lim * dt
             ve_out = self._prev_ve + ae_lim * dt
             self._prev_vn = vn_out
@@ -526,6 +731,15 @@ class DroneController:
             ve_out = self._ema_ve
 
         return vn_out, ve_out
+
+    @staticmethod
+    def _clamp_accel(an: float, ae: float) -> tuple[float, float]:
+        """Magnitude-preserving acceleration clamp at cfg.MAX_ACCEL_MS2."""
+        mag = math.hypot(an, ae)
+        if mag <= cfg.MAX_ACCEL_MS2 or mag == 0.0:
+            return an, ae
+        scale = cfg.MAX_ACCEL_MS2 / mag
+        return an * scale, ae * scale
 
     # ------------------------------------------------------------------
     #  Drone yaw / gimbal pan correction
@@ -588,4 +802,10 @@ class DroneController:
         self._prev_ae = 0.0
         self._loiter_issued = False
         self._alert_issued  = False
+        self._confirm_count = 0
+        self._retreating    = False
+        self._vel_above_t   = -1.0
+        self._bearing_init  = False
+        self._session_start_t   = -1.0
+        self._session_rtl_issued = False
         self._ekf.reset()

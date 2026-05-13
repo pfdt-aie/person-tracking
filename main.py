@@ -98,6 +98,23 @@ def parse_args() -> argparse.Namespace:
         default=cfg.STREAM_TOKEN,
         help="Auth token required on control endpoints when server is exposed.",
     )
+    p.add_argument(
+        "--ground-test",
+        action="store_true",
+        default=False,
+        help="Dry-run mode: full pipeline runs, telemetry is read, but NO "
+             "MAVLink commands (velocity/position/mode) are transmitted. "
+             "Use for bench tests with a real person in front of the camera.",
+    )
+    p.add_argument(
+        "--cells",
+        type=int,
+        default=0,
+        choices=[0, 3, 4, 5, 6],
+        help="Battery cell count override (3–6). 0 (default) = auto-detect "
+             "from pack voltage. Use this when the auto-detection is "
+             "ambiguous on a partially-charged pack.",
+    )
     return p.parse_args()
 
 
@@ -142,9 +159,12 @@ def print_banner(args: argparse.Namespace) -> None:
 def main() -> int:
     # Install session log before any print() so banner + all output go to file.
     from utils.logger import setup_log, teardown_log
+    from utils.flight_log import init_flight_log, close_flight_log
     _script_dir = os.path.dirname(os.path.abspath(__file__))
     log_dir     = os.path.join(_script_dir, "logs")
     log_path, orig_stdout, orig_stderr, log_file = setup_log(log_dir)
+    # S3.2 — structured JSONL event log alongside the stdout capture.
+    init_flight_log(log_dir)
 
     args = parse_args()
 
@@ -167,7 +187,17 @@ def main() -> int:
         stream_host      = args.stream_host,
         stream_token     = args.stream_token,
         model_path       = str(model_path),
+        ground_test      = args.ground_test,
+        cells_override   = args.cells,
     )
+
+    if args.ground_test:
+        print()
+        print("=" * 62)
+        print("  ⚠ GROUND-TEST MODE — MAVLINK TX SUPPRESSED")
+        print("  Drone will receive ZERO commands. Use for bench tests only.")
+        print("=" * 62)
+        print()
 
     print_banner(args)
     print(f"[Log] Session log → {log_path}")
@@ -178,6 +208,7 @@ def main() -> int:
         tracker.run()
     finally:
         print(f"\n[Log] Session end: {datetime.now().strftime('%Y-%m-%d  %H:%M:%S')}")
+        close_flight_log()
         teardown_log(orig_stdout, orig_stderr, log_file, log_path)
 
     return 0

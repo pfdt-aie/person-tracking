@@ -20,6 +20,7 @@ Tailscale setup (one-time):
 
 import json
 import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
@@ -30,7 +31,13 @@ import config as cfg
 from config.settings import Settings, load_settings
 
 # Endpoints that mutate state — require token when STREAM_TOKEN is set
-_CONTROL_PATHS = {'/click', '/unlock', '/mode', '/gimbal', '/zoom_in', '/zoom_out'}
+# /estop is intentionally NOT in this set: it must always be reachable
+# regardless of token state. Life safety overrides auth.
+_CONTROL_PATHS = {'/click', '/unlock', '/mode', '/gimbal',
+                  '/zoom_in', '/zoom_out', '/arm_tracker'}
+
+# Double-tap window for E-STOP → LAND escalation (seconds)
+_ESTOP_DOUBLE_TAP_S = 3.0
 
 
 # Stream resolutions
@@ -71,10 +78,16 @@ class StreamServer:
         self._zoom_cb   = None   # callable(direction: str) → None
         self._mode_cb   = None   # callable(mode_str_or_None) → dict
         self._gimbal_cb = None   # callable(direction: str) → dict
+        self._estop_cb  = None   # callable(action: str ∈ {"brake","land"}) → dict
+        self._estop_lock     = threading.Lock()
+        self._estop_last_t   = 0.0
+        self._estop_last_action = ""
+        self._preflight_cb = None   # callable() → list[dict] (per safety.PreflightCheck)
+        self._arm_cb       = None   # callable(on: bool) → dict
+        self._telemetry_cb = None   # callable() → dict (S3.1)
 
     # ------------------------------------------------------------------
     #  Frame push  (called by dedicated stream thread at STREAM_MAX_FPS)
-    # ------------------------------------------------------------------
 
     def push_frame(self, frame_hi, frame_lo=None) -> None:
         """Encode JPEG buffers and wake all MJPEG client threads."""
@@ -107,9 +120,9 @@ class StreamServer:
             jpg = self._jpg_lo if quality == 'lo' else self._jpg_hi
             return jpg, self._frame_id
 
-    # ------------------------------------------------------------------
+
     #  Callback wiring
-    # ------------------------------------------------------------------
+   
 
     def set_click_callback(self, cb) -> None:
         self._click_cb = cb
@@ -122,6 +135,89 @@ class StreamServer:
 
     def set_gimbal_callback(self, cb) -> None:
         self._gimbal_cb = cb
+
+    def _is_armed(self) -> bool:
+        """Best-effort read of current drone-armed state for UI sync.
+
+        Calls the arm callback with on=None (a query) if it accepts it,
+        otherwise returns False. The arm callback handler accepts the
+        None sentinel and returns the current state without mutating.
+        """
+        cb = self._arm_cb
+        if cb is None:
+            return False
+        try:
+            result = cb(None)
+            return bool(result.get("armed", False))
+        except Exception:
+            return False
+
+    def set_preflight_callback(self, cb) -> None:
+        """Wire the preflight checklist provider.
+
+        Args:
+            cb: zero-arg callable returning a list of dicts
+                {"name": str, "ok": bool, "message": str}.
+        """
+        self._preflight_cb = cb
+
+    def set_arm_callback(self, cb) -> None:
+        """Wire the drone-body arm handler.
+
+        Args:
+            cb: callable(on: bool) → dict. Implementation must refuse to
+                set on=True unless all preflight items pass.
+        """
+        self._arm_cb = cb
+
+    def set_telemetry_callback(self, cb) -> None:
+        """Wire the live-telemetry provider (S3.1).
+
+        Args:
+            cb: zero-arg callable returning a dict merged into /status.
+                Should include mode, gps_fix/hdop/sats, battery_v, fence,
+                ekf_healthy, drone_armed, tracking_loss_s, fps, rc_override.
+        """
+        self._telemetry_cb = cb
+
+    def set_estop_callback(self, cb) -> None:
+        """Wire the E-STOP handler.
+
+        Args:
+            cb: callable(action: str) → dict where action is "brake" on first
+                press and "land" on a press within _ESTOP_DOUBLE_TAP_S of the
+                previous press. The callback returns a status dict that is
+                echoed back to the browser.
+        """
+        self._estop_cb = cb
+
+    def trigger_estop(self) -> dict:
+        """Invoke the E-STOP callback with brake/land escalation.
+
+        Returns a status dict for the HTTP response. Always returns a
+        well-formed dict even if no callback is wired — the UI must never
+        silently swallow an E-STOP press.
+        """
+        now = time.monotonic()
+        with self._estop_lock:
+            action = "land" if (now - self._estop_last_t) < _ESTOP_DOUBLE_TAP_S \
+                              and self._estop_last_action == "brake" \
+                     else "brake"
+            self._estop_last_t = now
+            self._estop_last_action = action
+
+        cb = self._estop_cb
+        print(f"[ESTOP] fired action={action} t={time.strftime('%H:%M:%S')}")
+        if cb is None:
+            return {"status": "error", "action": action,
+                    "msg": "E-STOP not wired — MAVLink unavailable"}
+        try:
+            result = cb(action) or {}
+        except Exception as exc:
+            return {"status": "error", "action": action, "msg": str(exc)}
+        result.setdefault("status", "ok")
+        result.setdefault("action", action)
+        return result
 
     # ------------------------------------------------------------------
     #  HTML UI
@@ -156,6 +252,36 @@ body{{display:flex;flex-direction:column;font-family:monospace;color:#ddd}}
 #ubtn{{margin-left:auto;background:#550000;color:#ffaaaa;border:1px solid #a00;
        padding:2px 10px;border-radius:4px;cursor:pointer;font-size:11px}}
 #ubtn:hover{{background:#880000}}
+#armbtn{{background:#222244;color:#ccccff;border:1px solid #4444aa;
+         padding:2px 10px;border-radius:4px;cursor:pointer;font-size:11px;font-weight:bold}}
+#armbtn:hover{{background:#333366}}
+#armbtn.armed{{background:#226600;color:#ddffdd;border:1px solid #5acc5a}}
+#pfpanel{{position:absolute;top:34px;right:140px;z-index:20;
+         background:rgba(0,0,0,.92);border:1px solid #444;
+         padding:10px 14px;border-radius:6px;min-width:280px;
+         font-size:12px;color:#ddd}}
+#pflist{{margin-bottom:10px}}
+.pfok{{color:#7fff7f}}
+.pferr{{color:#ff8080}}
+.pfrow{{display:flex;justify-content:space-between;padding:2px 0;
+        border-bottom:1px dotted #333}}
+#armgo{{background:#226600;color:#fff;border:1px solid #5acc5a;
+       padding:4px 10px;cursor:pointer;border-radius:4px;font-weight:bold}}
+#armgo:hover{{background:#338833}}
+#armgo:disabled{{opacity:.4;cursor:not-allowed}}
+#disarmgo{{margin-left:6px;background:#552200;color:#ffcc99;border:1px solid #aa6633;
+          padding:4px 10px;cursor:pointer;border-radius:4px}}
+#disarmgo:hover{{background:#774400}}
+#estop{{background:#aa0000;color:#fff;border:2px solid #ff5555;
+        padding:4px 16px;border-radius:4px;cursor:pointer;
+        font-size:14px;font-weight:bold;letter-spacing:1px;
+        box-shadow:0 0 8px rgba(255,0,0,.6);animation:estoppulse 1.6s infinite}}
+#estop:hover{{background:#ff0000}}
+#estop.armed{{background:#ff3300;animation:none}}
+@keyframes estoppulse{{
+  0%,100%{{box-shadow:0 0 6px rgba(255,0,0,.4)}}
+  50%   {{box-shadow:0 0 14px rgba(255,80,80,.95)}}
+}}
 #wrap{{flex:1;position:relative;display:flex;
        justify-content:center;align-items:center;background:#000}}
 canvas{{max-width:100%;max-height:100%;display:block;cursor:crosshair}}
@@ -190,12 +316,20 @@ canvas{{max-width:100%;max-height:100%;display:block;cursor:crosshair}}
 <div id="hdr">
   <h1>&#9654; DRONE TRACKER</h1>
   <span id="stat">connecting…</span>
+  <span id="telem" style="font-size:11px;color:#7fff7f;margin-left:6px"></span>
   <span id="badge">LOCK ID ?</span>
   <button id="mbtn" data-mode="AUTO" onclick="toggleMode()" title="Toggle Manual/Auto">AUTO</button>
   <button class="zbtn" onclick="doZoom('in')"  title="Zoom In">I</button>
   <button class="zbtn" onclick="doZoom('out')" title="Zoom Out">O</button>
   <button id="qbtn"  onclick="toggleQuality()" title="Switch HD/SD quality">HD</button>
   <button id="ubtn" onclick="doUnlock()">UNLOCK</button>
+  <button id="armbtn" onclick="togglePreflight()" title="Preflight checklist + arm tracker">ARM ▾</button>
+  <button id="estop" onclick="doEstop()" title="Emergency stop — first press BRAKE, second LAND, or Space">E-STOP</button>
+</div>
+<div id="pfpanel" style="display:none">
+  <div id="pflist"></div>
+  <button id="armgo" onclick="doArm()">Arm Tracker</button>
+  <button id="disarmgo" onclick="doDisarm()">Disarm</button>
 </div>
 <div id="wrap">
   <canvas id="c" width="{_STREAM_W_HI}" height="{_STREAM_H_HI}"></canvas>
@@ -302,9 +436,32 @@ function toggleQuality() {{
   showToast(streamQuality === 'hi' ? '720p HD' : '480p SD — lower bandwidth', false);
 }}
 
+// S3.1 — telemetry strip update. /status now carries failsafe state.
+function fmt(v, suffix) {{ return (v == null) ? '—' : (v + (suffix || '')); }}
+function syncTelemetry(d) {{
+  const el = document.getElementById('telem');
+  if (!el || !d) return;
+  if (d.drone_enabled === false) {{ el.textContent = ''; return; }}
+  const parts = [];
+  parts.push((d.mode_fcu || '?') + (d.armed_fcu ? '·ARM' : ''));
+  if (d.rc_override) parts.push('RC-OVR');
+  if (d.fence_breach) parts.push('FENCE');
+  parts.push('GPS ' + fmt(d.gps_fix) + '/' + fmt(d.gps_sats) +
+             ' HDOP ' + fmt(d.gps_hdop));
+  parts.push(fmt(d.battery_v, 'V'));
+  if (d.fps != null) parts.push(d.fps + 'fps');
+  if (d.tracking_loss_s != null && d.tracking_loss_s > 1.0)
+    parts.push('lost ' + d.tracking_loss_s + 's');
+  if (d.ground_test) parts.push('DRY-RUN');
+  el.textContent = parts.join(' · ');
+  el.style.color = (d.rc_override || d.fence_breach) ? '#ff8080' : '#7fff7f';
+}}
 setInterval(() => {{
-  fetch('/status').then(r => r.json()).then(syncBadge).catch(() => {{}});
-}}, 2000);
+  fetch('/status').then(r => r.json()).then(d => {{
+    syncBadge(d);
+    syncTelemetry(d);
+  }}).catch(() => {{}});
+}}, 1000);
 
 function toggleMode() {{
   const btn  = document.getElementById('mbtn');
@@ -329,6 +486,77 @@ function applyMode(mode) {{
 
 function gDir(dir) {{ fetch(ctlUrl('/gimbal?dir=' + dir)).catch(() => {{}}); }}
 function gStop()   {{ fetch(ctlUrl('/gimbal?dir=stop')).catch(() => {{}}); }}
+
+// S1.3 — Preflight checklist + arm tracker.
+let pfOpen = false;
+let pfTimer = null;
+function togglePreflight() {{
+  pfOpen = !pfOpen;
+  document.getElementById('pfpanel').style.display = pfOpen ? 'block' : 'none';
+  if (pfOpen) {{
+    refreshPreflight();
+    pfTimer = setInterval(refreshPreflight, 2000);
+  }} else if (pfTimer) {{
+    clearInterval(pfTimer);
+    pfTimer = null;
+  }}
+}}
+function refreshPreflight() {{
+  fetch('/preflight').then(r => r.json()).then(d => {{
+    const list = document.getElementById('pflist');
+    list.innerHTML = '';
+    (d.items || []).forEach(it => {{
+      const row = document.createElement('div');
+      row.className = 'pfrow';
+      const left = document.createElement('span');
+      left.textContent = it.name;
+      left.className = it.ok ? 'pfok' : 'pferr';
+      const right = document.createElement('span');
+      right.textContent = it.ok ? 'OK' : (it.message || 'FAIL');
+      right.className = it.ok ? 'pfok' : 'pferr';
+      row.appendChild(left); row.appendChild(right);
+      list.appendChild(row);
+    }});
+    document.getElementById('armgo').disabled = !d.all_ok;
+    const btn = document.getElementById('armbtn');
+    btn.classList.toggle('armed', !!d.armed);
+    btn.textContent = (d.armed ? 'ARMED ▾' : 'ARM ▾');
+  }}).catch(() => {{}});
+}}
+function doArm() {{
+  fetch(ctlUrl('/arm_tracker?on=true')).then(r => r.json()).then(d => {{
+    showToast(d.status === 'ok' ? 'Tracker ARMED' : ('Arm refused: ' + (d.msg || '')), d.status !== 'ok');
+    refreshPreflight();
+  }}).catch(() => showToast('Arm request failed', true));
+}}
+function doDisarm() {{
+  fetch(ctlUrl('/arm_tracker?on=false')).then(r => r.json()).then(d => {{
+    showToast('Tracker DISARMED', false);
+    refreshPreflight();
+  }}).catch(() => showToast('Disarm request failed', true));
+}}
+
+// S1.1 — Software E-STOP. First press → BRAKE; second press within 3 s → LAND.
+// Always reachable (no token check), also bound to Space key for fast access.
+function doEstop() {{
+  const btn = document.getElementById('estop');
+  btn.classList.add('armed');
+  fetch('/estop').then(r => r.json()).then(d => {{
+    const a = (d.action || 'brake').toUpperCase();
+    showToast('E-STOP → ' + a + (d.status === 'ok' ? '' : ' (' + (d.msg || 'check fcu') + ')'),
+              d.status !== 'ok');
+    setTimeout(() => btn.classList.remove('armed'), 2500);
+  }}).catch(() => {{
+    showToast('E-STOP request failed — try again or use RC', true);
+    btn.classList.remove('armed');
+  }});
+}}
+window.addEventListener('keydown', e => {{
+  if (e.code === 'Space' && !e.repeat) {{
+    e.preventDefault();
+    doEstop();
+  }}
+}});
 
 setInterval(() => {{
   fetch(ctlUrl('/mode')).then(r => r.json()).then(d => {{
@@ -447,6 +675,17 @@ async function runStream() {{
                 elif route == '/status':
                     cb = server_ref._click_cb
                     data = cb(None, None) if cb else {'lock_id': None, 'ids': []}
+                    tcb = server_ref._telemetry_cb
+                    if tcb is not None:
+                        try:
+                            telem = tcb() or {}
+                        except Exception as exc:
+                            telem = {"telemetry_error": str(exc)}
+                        if isinstance(data, dict):
+                            # S3.1 — preserve existing keys; telemetry fields
+                            # are namespaced if they would shadow.
+                            for k, v in telem.items():
+                                data.setdefault(k, v)
                     self._json(data)
                 elif route == '/zoom_in':
                     zb = server_ref._zoom_cb
@@ -469,6 +708,25 @@ async function runStream() {{
                     data = cb(direction) if cb else {'status': 'error', 'msg': 'not ready'}
                     code = 400 if isinstance(data, dict) and data.get('status') == 'error' else 200
                     self._json(data, code)
+                elif route == '/estop':
+                    # E-STOP bypasses token auth on purpose — life safety
+                    # always reachable. First press → BRAKE; second press
+                    # within 3 s → LAND.
+                    data = server_ref.trigger_estop()
+                    self._json(data)
+                elif route == '/preflight':
+                    cb = server_ref._preflight_cb
+                    items = cb() if cb else []
+                    armed = bool(server_ref._is_armed())
+                    self._json({"items": items,
+                                "all_ok": all(i.get("ok") for i in items) if items else False,
+                                "armed": armed})
+                elif route == '/arm_tracker':
+                    kv = urllib.parse.parse_qs(qs, keep_blank_values=False)
+                    on = (kv.get('on', ['true'])[0].lower() == 'true')
+                    cb = server_ref._arm_cb
+                    data = cb(on) if cb else {'status': 'error', 'msg': 'not wired'}
+                    self._json(data)
                 else:
                     self.send_response(404)
                     self.end_headers()

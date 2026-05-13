@@ -185,12 +185,25 @@ MAVLINK_BAUD: int    = 921600
 # --- Following geometry ---
 FOLLOW_ALTITUDE_M: float      = 12.0   # Target AGL altitude to maintain (m)
 FOLLOW_STANDOFF_M: float      = 8.0    # Horizontal distance to hold behind/away from person (m)
-MIN_PERSON_DRONE_SEP_M: float = 4.0    # Hard minimum separation — hover if closer (m)
+MIN_PERSON_DRONE_SEP_M: float = 4.0    # Hard minimum separation — retreat if closer (m)
+MIN_VERTICAL_SEP_M: float     = 4.0    # Soft vertical clearance above person (m)
+RETREAT_SPEED_MS: float       = 1.0    # Speed used when actively backing away from subject
+RETREAT_HYSTERESIS_M: float   = 1.5    # Re-engage follow only when sep > MIN_SEP + this (m)
 STANDOFF_VEL_THRESHOLD_MS: float = 0.3 # Use person velocity direction above this speed (m/s)
 MAX_TRACKING_SPEED_MS: float  = 5.0    # Hard velocity cap (m/s) — SAFETY-CRITICAL
+
+# --- Standoff bearing hysteresis (S2.6) ---
+# Person must sustain motion above STANDOFF_VEL_THRESHOLD_MS for this long
+# before bearing source flips from position-based (drone→person line) to
+# velocity-based (person's heading). Prevents flicker on brief stops.
+BEARING_LATCH_S: float        = 1.0
+# Maximum rate of change of the standoff bearing (degrees per second).
+# Smooths transitions so the target NED point cannot teleport.
+BEARING_SLEW_DEG_S: float     = 30.0
 MIN_ALT_M: float             = 10.0  # Absolute altitude floor (m AGL) — SAFETY-CRITICAL
 MAX_ALT_M: float             = 80.0  # Altitude ceiling (m AGL)
 GEOFENCE_RADIUS_M: float     = 500.0 # Circular geofence radius around home (m)
+HOME_KEEPOUT_RADIUS_M: float = 5.0   # No-fly cylinder around HOME (operator stands here)
 
 # --- Proportional controller ---
 DRONE_KP: float     = 0.4    # Position error → velocity (m/s per meter of error)
@@ -199,6 +212,7 @@ DRONE_KP_YAW: float = 0.6    # Gimbal pan angle → drone yaw rate (rad/s per de
 # --- Velocity smoothing ---
 VEL_EMA_ALPHA: float  = 0.25    # EMA filter factor (0.1=smooth/laggy, 0.5=responsive)
 MAX_JERK_MS3: float   = 2.0     # Jerk limit (m/s³)
+MAX_ACCEL_MS2: float  = 2.0     # Hard acceleration cap (m/s²) applied after jerk limiter
 
 # --- MAVLink send rate ---
 DRONE_CMD_RATE_HZ: int   = 10   # Velocity command send rate
@@ -208,13 +222,34 @@ TRACKING_LOSS_HOVER_S: float  = 2.0    # Seconds before sending zero velocity
 TRACKING_LOSS_LOITER_S: float = 5.0    # Seconds before issuing LOITER command
 TRACKING_LOSS_ALERT_S: float  = 15.0   # Seconds before GCS terminal alert
 
+# --- Detection confirmation before drone body movement ---
+# Gimbal tracks immediately; drone body stays at zero velocity until this many
+# consecutive frames have a valid detection. Prevents false-positive (bush/dog)
+# from yanking the airframe.
+BODY_MOVE_CONFIRM_FRAMES: int = 5
+
+# --- Latency floor for drone body control (S3.5) ---
+# When effective detection FPS drops below this, the drone body holds (sends
+# zero velocity) so stale frames cannot drive a position command. Gimbal is
+# unaffected.
+MIN_TRACKING_FPS: float = 8.0
+# Number of recent detection ticks averaged when estimating FPS.
+FPS_WINDOW_SIZE: int    = 20
+
 # --- Hybrid gimbal/drone thresholds ---
 GIMBAL_PAN_SOFT_DEG: float  = 60.0    # Drone starts rotating toward person
 GIMBAL_PAN_HARD_DEG: float  = 120.0   # Drone rotates aggressively
 
 # --- Safety watchdog ---
-HEARTBEAT_WATCHDOG_S: float  = 3.0    # Max seconds without MAVLink heartbeat
+# ArduPilot emits HEARTBEAT at 1 Hz. WATCHDOG must allow at least one missed
+# packet to avoid false-firing on normal jitter; 2.0 s = 1 missed HB allowed.
+# At MAX_TRACKING_SPEED_MS=5, 2.0 s × 5 = 10 m drift before commands stop.
+HEARTBEAT_WATCHDOG_S: float  = 2.0    # Max seconds without MAVLink heartbeat
+HEARTBEAT_WARN_S: float      = 1.0    # Early warning threshold (between HBs)
 GPS_MIN_FIX_TYPE: int        = 3      # Minimum GPS fix (3 = 3D fix)
+GPS_MAX_HDOP: float          = 1.5    # Reject if HDOP > this
+GPS_MIN_SATS: int            = 10     # Reject if visible sats < this
+EKF_MAX_VARIANCE: float      = 1.0    # Reject if FCU EKF horizontal variance > this
 
 # --- Battery ---
 DEFAULT_CELLS: int           = 4      # Fallback if auto-detection fails
@@ -233,6 +268,7 @@ GIMBAL_COAST_S: float          = 0.5    # Suppress EKF update if telemetry stale
 EKF_PROCESS_NOISE: list = [0.1, 0.1, 0.5, 0.5]   # Q diag: [pN, pE, vN, vE]
 EKF_MEAS_NOISE:    list = [2.0, 2.0]              # R diag: [pN, pE] (m²)
 EKF_GATE_SIGMA:    float = 3.0                    # Mahalanobis gate (σ)
+EKF_MAX_JUMP_M:    float = 10.0                   # Euclidean jump rejection (S2.4)
 
 # =============================================================================
 #  CAMERA INTRINSICS
@@ -254,6 +290,7 @@ GEOFENCE_RETURN_MAX_MS: float   = 2.5   # max speed when returning from geofence
 GEOFENCE_RETURN_KP: float       = 0.3   # proportional gain: error_m → return speed
 RTL_MAX_ATTEMPTS: int           = 3     # max RTL command retries on battery critical
 RTL_RETRY_INTERVAL_S: float     = 1.0   # seconds between RTL retries
+MAX_FLIGHT_TIME_S: float        = 600.0 # Max armed-tracker session before auto-RTL (S3.3)
 LOITER_CONFIRM_TIMEOUT_S: float = 2.0   # seconds to wait for LOITER mode confirmation
 MODE_WARN_INTERVAL_S: float     = 5.0   # rate-limit for "not in GUIDED" log message
 

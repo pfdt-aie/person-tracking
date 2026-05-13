@@ -23,9 +23,7 @@ import config as cfg
 from config.settings import Settings, load_settings
 
 
-# ---------------------------------------------------------------------------
 #  Geofence definition
-# ---------------------------------------------------------------------------
 
 @dataclass
 class GeofenceCircle:
@@ -45,9 +43,7 @@ class GeofenceCircle:
     alt_max_m:  float = cfg.MAX_ALT_M
 
 
-# ---------------------------------------------------------------------------
 #  Main safety monitor
-# ---------------------------------------------------------------------------
 
 class SafetyMonitor:
     """Central safety constraint enforcer.
@@ -73,10 +69,9 @@ class SafetyMonitor:
         self._fence   = geofence or GeofenceCircle()
         self._lock    = threading.Lock()
         self._n_cells = _s.default_cells   # updated by mavlink_client on connect
+        self._hb_warn_logged: bool = False  # latch so early-warn prints once per gap
 
-    # ------------------------------------------------------------------
     #  Initialisation
-    # ------------------------------------------------------------------
 
     def set_home(self, lat: float, lon: float) -> None:
         """Set the geofence centre to the current home position.
@@ -103,9 +98,9 @@ class SafetyMonitor:
         else:
             print(f"[Safety] WARNING: implausible cell count {n_cells} — ignoring")
 
-    # ------------------------------------------------------------------
+  
     #  Rule 1: Altitude floor / ceiling
-    # ------------------------------------------------------------------
+
 
     def check_altitude(self, alt_m: float) -> float:
         """Clamp a commanded altitude to the safe operating window.
@@ -126,9 +121,8 @@ class SafetyMonitor:
             return ceiling
         return alt_m
 
-    # ------------------------------------------------------------------
-    #  Rule 2: Speed cap
-    # ------------------------------------------------------------------
+
+    #  Rule 2: Speed cap           
 
     def check_velocity(
         self, vN: float, vE: float, vD: float
@@ -157,9 +151,9 @@ class SafetyMonitor:
         vD = max(-max_v, min(max_v, vD))
         return vN, vE, vD
 
-    # ------------------------------------------------------------------
+
     #  Rule 3: Geofence
-    # ------------------------------------------------------------------
+
 
     def check_geofence(
         self, lat: float, lon: float, alt_agl: float
@@ -229,9 +223,37 @@ class SafetyMonitor:
 
         return True
 
-    # ------------------------------------------------------------------
+    #  Rule 3b: HOME keep-out (S2.2)
+
+    def check_home_keepout(self, pN: float, pE: float) -> bool:
+        """Return True if NED point (pN, pE) is OUTSIDE the HOME keep-out.
+
+        The keep-out is a no-fly cylinder around HOME at radius
+        HOME_KEEPOUT_RADIUS_M, used to prevent the drone from flying over
+        the operator who is typically standing at HOME.
+
+        Geometry note: NED origin in DroneController is set to HOME, so
+        keep-out radius equals euclidean distance from the NED origin in
+        the horizontal plane.
+
+        Args:
+            pN, pE: candidate target NED position (metres from HOME).
+
+        Returns:
+            True if safe (outside keep-out), False if inside.
+        """
+        dist = math.hypot(pN, pE)
+        if dist < cfg.HOME_KEEPOUT_RADIUS_M:
+            self._log(
+                f"HOME keep-out breach: target {dist:.1f}m from HOME "
+                f"(min {cfg.HOME_KEEPOUT_RADIUS_M:.1f}m)"
+            )
+            return False
+        return True
+
+
     #  Rule 4: Heartbeat watchdog
-    # ------------------------------------------------------------------
+
 
     def watchdog_heartbeat(self, last_heartbeat_t: float) -> bool:
         """Return False if the MAVLink heartbeat is stale.
@@ -243,14 +265,19 @@ class SafetyMonitor:
             True if heartbeat is fresh. False if stale (> HEARTBEAT_WATCHDOG_S).
         """
         age = time.monotonic() - last_heartbeat_t
-        if age > cfg.HEARTBEAT_WATCHDOG_S:
+        if age <= cfg.HEARTBEAT_WARN_S:
+            self._hb_warn_logged = False
+        elif age > cfg.HEARTBEAT_WATCHDOG_S:
             self._log(f"MAVLink heartbeat lost ({age:.1f}s stale)")
             return False
-        return True
+        elif not self._hb_warn_logged:
+            self._log(f"MAVLink heartbeat late ({age:.1f}s) — watching")
+            self._hb_warn_logged = True
+        return age <= cfg.HEARTBEAT_WATCHDOG_S
 
-    # ------------------------------------------------------------------
+
     #  Rule 5: Battery critical
-    # ------------------------------------------------------------------
+
 
     def is_battery_critical(self, voltage_v: float) -> bool:
         """Return True if per-cell voltage is below the critical threshold.
@@ -274,9 +301,9 @@ class SafetyMonitor:
             return True
         return False
 
-    # ------------------------------------------------------------------
+
     #  Geofence helpers (for return-to-safe velocity in drone_controller)
-    # ------------------------------------------------------------------
+
 
     def get_fence_centre(self) -> tuple:
         """Return geofence centre (lat_deg, lon_deg)."""
@@ -290,11 +317,16 @@ class SafetyMonitor:
             return not (self._fence.centre_lat == 0.0
                         and self._fence.centre_lon == 0.0)
 
-    # ------------------------------------------------------------------
+
     #  Logging
-    # ------------------------------------------------------------------
+
 
     def _log(self, msg: str) -> None:
-        """Print a safety violation to the terminal."""
+        """Print a safety violation to the terminal and emit a structured event."""
         ts = time.strftime("%H:%M:%S")
         print(f"[Safety] {ts} WARNING: {msg}")
+        try:
+            from utils.flight_log import get_flight_log
+            get_flight_log().event("safety_warning", message=msg)
+        except Exception:
+            pass
