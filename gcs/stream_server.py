@@ -796,11 +796,64 @@ async function runStream() {{
         self._thread = threading.Thread(
             target=self._server.serve_forever, daemon=True, name='StreamSrv')
         self._thread.start()
+
+        # Build operator-friendly URLs.  When bound to all interfaces we
+        # prefer the Tailscale IP (the deployment's standard transport),
+        # then fall back to the primary LAN IP, then loopback.
+        token_qs = f"?token={stream_token}" if stream_token else ""
+        urls = self._operator_urls(stream_host, self._port, token_qs)
+
         print(f"[STREAM] 720p live stream ready  host={stream_host}  port={self._port}")
-        print(f"  Browser   http://{stream_host}:{self._port}/  (click to track)")
-        print(f"  Raw MJPEG http://{stream_host}:{self._port}/stream")
+        for label, url in urls:
+            print(f"  {label}  {url}")
+
         if stream_host != '127.0.0.1' and not stream_token:
-            print("[STREAM] WARNING: server exposed on network without STREAM_TOKEN — set it!")
+            print("[STREAM] ⚠ WARNING: server exposed on all interfaces "
+                  "without --stream-token. Anyone on the LAN or tailnet "
+                  "can control the drone. Set a token immediately.")
+
+    @staticmethod
+    def _operator_urls(stream_host: str, port: int, token_qs: str) -> list:
+        """Return a list of (label, url) pairs to print at server start.
+
+        When the server is bound to 0.0.0.0 we resolve the Tailscale and
+        LAN IPs separately so the operator does not have to look them up.
+        Failure to resolve any of these is silent — the printed list
+        simply omits that entry.
+        """
+        import shutil
+        import socket
+        import subprocess
+
+        pairs: list[tuple[str, str]] = []
+        if stream_host == "0.0.0.0":
+            # Tailscale IP — only present when tailscaled is up.
+            ts = shutil.which("tailscale")
+            if ts:
+                try:
+                    r = subprocess.run([ts, "ip", "-4"], capture_output=True,
+                                       text=True, timeout=1.5)
+                    if r.returncode == 0:
+                        ts_ip = r.stdout.strip().splitlines()[0].strip()
+                        if ts_ip:
+                            pairs.append(("Tailscale", f"http://{ts_ip}:{port}/{token_qs}"))
+                except Exception:
+                    pass
+            # Primary LAN IP via best-effort UDP-connect trick.
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("8.8.8.8", 80))
+                lan_ip = s.getsockname()[0]
+                s.close()
+                if lan_ip and not pairs or (pairs and pairs[0][1].split('/')[2].split(':')[0] != lan_ip):
+                    pairs.append(("LAN      ", f"http://{lan_ip}:{port}/{token_qs}"))
+            except Exception:
+                pass
+            pairs.append(("Local    ", f"http://127.0.0.1:{port}/{token_qs}"))
+        else:
+            pairs.append(("Browser  ", f"http://{stream_host}:{port}/{token_qs}"))
+        pairs.append(("MJPEG raw", f"http://{stream_host}:{port}/stream"))
+        return pairs
 
     def stop(self) -> None:
         if not self._active:

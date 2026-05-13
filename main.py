@@ -89,14 +89,15 @@ def parse_args() -> argparse.Namespace:
         "--stream-host",
         type=str,
         default=cfg.STREAM_HOST,
-        help=f'Stream server bind address (default: {cfg.STREAM_HOST}). '
-             f'Use "0.0.0.0" for LAN/Tailscale.',
+        help=f'Stream server bind address (default: {cfg.STREAM_HOST} — '
+             f'open to LAN/Tailscale; use 127.0.0.1 to bind loopback only).',
     )
     p.add_argument(
         "--stream-token",
         type=str,
         default=cfg.STREAM_TOKEN,
-        help="Auth token required on control endpoints when server is exposed.",
+        help="Auth token required on control endpoints. STRONGLY recommended "
+             "when --stream-host is 0.0.0.0 (the default).",
     )
     p.add_argument(
         "--ground-test",

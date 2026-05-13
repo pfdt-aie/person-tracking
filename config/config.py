@@ -137,7 +137,7 @@ RECORD_BITRATE: int    = 20_000_000    # H.264 encoder bitrate (bps)
 STREAM_ENABLED: bool   = True         # False = disable HTTP server entirely
 STREAM_PORT: int       = 8080         # HTTP port
 STREAM_MAX_FPS: int    = 25           # cap stream FPS
-STREAM_HOST: str       = "127.0.0.1"  # bind address; "0.0.0.0" for LAN/Tailscale access
+STREAM_HOST: str       = "0.0.0.0"    # bind address; default opens to LAN/Tailscale (always pair with STREAM_TOKEN)
 STREAM_TOKEN: str      = ""           # if non-empty, required on all control endpoints
 
 STREAM_QUALITY_HI: int = 65      # JPEG quality for 720p stream
