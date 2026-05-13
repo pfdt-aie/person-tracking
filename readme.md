@@ -15,6 +15,7 @@ Jetson Orin · SIYI A8 mini · Orange Cube+ (ArduPilot) · YOLOv8 · TensorRT
 [![ArduPilot](https://img.shields.io/badge/ArduPilot-Copter-2C3E50)](https://ardupilot.org/copter/)
 [![MAVLink](https://img.shields.io/badge/MAVLink-2.0-FF6F00)](https://mavlink.io/)
 [![pytest](https://img.shields.io/badge/tests-170%20passing-success?logo=pytest&logoColor=white)](#testing)
+[![Tailscale](https://img.shields.io/badge/Tailscale-WireGuard-242424?logo=tailscale&logoColor=white)](https://tailscale.com/)
 [![Status](https://img.shields.io/badge/status-ground--test%20ready-yellow)]()
 
 </div>
@@ -44,18 +45,18 @@ Jetson Orin · SIYI A8 mini · Orange Cube+ (ArduPilot) · YOLOv8 · TensorRT
 3. [Hardware Requirements](#3-hardware-requirements)
 4. [System Architecture](#4-system-architecture)
 5. [Installation](#5-installation)
-6. [Quick Start](#6-quick-start)
-7. [Operating Procedure](#7-operating-procedure)
-8. [Manual Control](#8-manual-control)
-9. [Command Reference](#9-command-reference)
-10. [HTTP API](#10-http-api)
-11. [Streaming Protocol](#11-streaming-protocol)
-12. [Safety System](#12-safety-system)
-13. [State Machine](#13-state-machine)
-14. [Configuration](#14-configuration)
-15. [ArduPilot Parameters](#15-ardupilot-parameters)
-16. [Logs & Recording](#16-logs--recording)
-17. [Remote Operation (Tailscale)](#17-remote-operation-tailscale)
+6. [Network & Remote Access (Tailscale)](#6-network--remote-access-tailscale)
+7. [Quick Start](#7-quick-start)
+8. [Operating Procedure](#8-operating-procedure)
+9. [Manual Control](#9-manual-control)
+10. [Command Reference](#10-command-reference)
+11. [HTTP API](#11-http-api)
+12. [Streaming Protocol](#12-streaming-protocol)
+13. [Safety System](#13-safety-system)
+14. [State Machine](#14-state-machine)
+15. [Configuration](#15-configuration)
+16. [ArduPilot Parameters](#16-ardupilot-parameters)
+17. [Logs & Recording](#17-logs--recording)
 18. [Testing](#18-testing)
 19. [Project Layout](#19-project-layout)
 20. [Shutdown](#20-shutdown)
@@ -124,7 +125,8 @@ behaviour, FPS floor, and RC-override lock-out.
 | **FCU link** | USB serial · `/dev/ttyACM0` · 921 600 baud |
 | **Battery** | 3S–6S LiPo (auto-detected; override via `--cells N`) |
 | **RC system** | Any TX/RX bound to FCU — required for manual override |
-| **Optional** | RTK GPS for sub-metre position, Tailscale gateway for remote ops |
+| **Remote link** | **Tailscale tailnet** — used for both SSH and the operator stream/UI |
+| **Optional** | RTK GPS for sub-metre position |
 
 </div>
 
@@ -179,58 +181,141 @@ pip install pymavlink
 
 # GStreamer NVDEC/NVENC plugins ship with JetPack 6 by default:
 #   gstreamer1.0-plugins-bad, nvv4l2decoder, nvv4l2h264enc
+
+# Tailscale on the Jetson — used for SSH and the operator UI.
+# (Skip if your tailnet is already authenticated on this device.)
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+tailscale ip -4         # note the 100.x.y.z address used in §6
 ```
 
 ---
 
-## 6. Quick Start
+## 6. Network & Remote Access (Tailscale)
+
+**Tailscale is the standard transport for this deployment** — both the SSH
+session that launches `main.py` and the operator's MJPEG / web UI traffic
+ride the same encrypted WireGuard tailnet. No port forwarding, no public IP,
+no static-IP dance.
+
+### Topology
+
+```
+   Operator laptop                       Jetson Orin
+   (Tailscale client)                    (Tailscale + main.py)
+        │                                     │
+        │  100.x.y.z                 100.a.b.c│
+        ├─────── tailnet (WireGuard) ─────────┤
+        │                                     │
+        ├── SSH :22 ────────────────────────► │
+        └── HTTP :8080  (MJPEG + Web UI) ───► │
+                                              │
+                              Local Wi-Fi to camera (192.168.144.25)
+                                              │
+                                              ▼
+                                        SIYI A8 mini
+```
+
+### One-time setup
 
 ```bash
+# On the Jetson
+sudo tailscale up
+tailscale ip -4              # → 100.a.b.c  (Jetson's tailnet IP)
+
+# On the operator laptop / phone
+# Install Tailscale, sign in to the same tailnet, then check connectivity:
+ping 100.a.b.c
+```
+
+### Each session
+
+```bash
+# 1. SSH into the Jetson from the operator laptop
+ssh ai-engineer@100.a.b.c
+
+# 2. Launch the tracker bound to all interfaces with a token
+cd /home/ai-engineer/Akash/Tasks/Akash/AI/Jetson/person_tracking
+python3 main.py --drone \
+    --stream-host 0.0.0.0 \
+    --stream-token MYSECRET
+
+# 3. From the same laptop (or any tailnet device) open the UI:
+#    http://100.a.b.c:8080/?token=MYSECRET
+```
+
+### Why this setup
+
+| Concern | Mitigation |
+|:---|:---|
+| **No internet exposure** | Port 8080 is bound to all interfaces, but only tailnet peers can reach the Jetson — there's no public route to it |
+| **Authentication** | `--stream-token` adds a second factor over the tailnet identity. Control endpoints reject mismatched tokens with HTTP 403 |
+| **E-STOP still reachable** | `/estop` intentionally bypasses the token — even with the wrong token in hand, the operator can still stop the drone |
+| **Multi-operator** | Anyone with tailnet ACL access and the token can open the UI from anywhere |
+| **Roaming** | The Jetson IP is stable across Wi-Fi, hotspots, and LTE — no reconnection ritual |
+
+> [!NOTE]
+> The default `STREAM_HOST` in [`config/config.py`](config/config.py) is
+> `127.0.0.1` (loopback only). You **must** pass
+> `--stream-host 0.0.0.0` (or your Tailscale IP) for the UI to be
+> reachable from a remote browser. Always pair with `--stream-token`.
+
+---
+
+## 7. Quick Start
+
+```bash
+# SSH to the Jetson over Tailscale, then:
 cd /home/ai-engineer/Akash/Tasks/Akash/AI/Jetson/person_tracking
 ```
 
-Three launch modes:
+Three launch modes — all assume Tailscale is the operator transport:
 
 <table>
 <tr><th>Mode</th><th>Command</th><th>Use case</th></tr>
 <tr>
   <td><b>Gimbal-only</b></td>
-  <td><code>python3 main.py</code></td>
+  <td><code>python3 main.py --stream-host 0.0.0.0 --stream-token MYSECRET</code></td>
   <td>Safest first run · no MAVLink · camera + gimbal tracking only</td>
 </tr>
 <tr>
   <td><b>Ground-test (dry-run)</b></td>
-  <td><code>python3 main.py --drone --ground-test</code></td>
+  <td><code>python3 main.py --drone --ground-test --stream-host 0.0.0.0 --stream-token MYSECRET</code></td>
   <td>Full pipeline executes but <b>no MAVLink TX</b> · bench rehearsal with a real subject</td>
 </tr>
 <tr>
   <td><b>Live flight</b></td>
-  <td><code>python3 main.py --drone</code></td>
+  <td><code>python3 main.py --drone --stream-host 0.0.0.0 --stream-token MYSECRET</code></td>
   <td>Autonomous drone-body following · requires GUIDED mode and a passing preflight</td>
 </tr>
 </table>
 
-Then open the operator UI: **`http://<jetson-ip>:8080/`**
+Then on the operator laptop:
+
+```
+http://<jetson-tailscale-ip>:8080/?token=MYSECRET
+```
 
 ---
 
-## 7. Operating Procedure
+## 8. Operating Procedure
 
-### 7.1 Pre-flight (every session)
+### 8.1 Pre-flight (every session)
 
 1. Power on SIYI camera (Wi-Fi 192.168.144.x).
 2. Power on the airframe — Cube Orange+ enumerates over USB.
 3. Power on the **RC transmitter**. Mode switch on **LOITER** or **STABILIZE** (**NOT** GUIDED).
-4. Launch `main.py` on the Jetson.
-5. Open `http://<jetson-ip>:8080/` in a browser.
+4. SSH into the Jetson over Tailscale: `ssh ai-engineer@<jetson-tailscale-ip>`.
+5. Launch `main.py` with the Tailscale-ready flags (see §7).
+6. On the operator laptop / phone, open `http://<jetson-tailscale-ip>:8080/?token=MYSECRET`.
 
-### 7.2 Gimbal tracking (camera only)
+### 8.2 Gimbal tracking (camera only)
 
 1. Click on the subject in the live video.
 2. Gimbal locks · HUD displays `LOCK ID N`.
 3. Click empty space (or **UNLOCK**) to release.
 
-### 7.3 Autonomous drone-body following
+### 8.3 Autonomous drone-body following
 
 1. Pilot switches RC mode to **GUIDED**.
 2. In the web UI header, click **ARM ▾** — preflight panel opens.
@@ -245,7 +330,7 @@ Then open the operator UI: **`http://<jetson-ip>:8080/`**
 
 ---
 
-## 8. Manual Control
+## 9. Manual Control
 
 Three independent layers of operator authority, all reachable at any moment:
 
@@ -273,9 +358,9 @@ Three independent layers of operator authority, all reachable at any moment:
 
 ---
 
-## 9. Command Reference
+## 10. Command Reference
 
-### 9.1 CLI flags
+### 10.1 CLI flags
 
 ```
 python3 main.py [--drone] [--ground-test] [--cells N]
@@ -297,7 +382,7 @@ python3 main.py [--drone] [--ground-test] [--cells N]
 | `--stream-host HOST` | `127.0.0.1` | Bind address. `0.0.0.0` for LAN / Tailscale |
 | `--stream-token TOKEN` | — | Auth token on control endpoints |
 
-### 9.2 Keyboard (display window open)
+### 10.2 Keyboard (display window open)
 
 | Key | Action | Key | Action |
 |:---:|:---|:---:|:---|
@@ -309,7 +394,7 @@ python3 main.py [--drone] [--ground-test] [--cells N]
 | `+` / `-` | Adaptive Kp gain | `[` / `]` | Max gimbal speed |
 | `m` | Toggle AUTO / MANUAL | `←↑↓→` | Manual gimbal (MANUAL only) |
 
-### 9.3 Terminal (headless / SSH)
+### 10.3 Terminal (headless / SSH)
 
 ```
 track <id>   Lock to persistent person ID
@@ -320,7 +405,7 @@ q            Quit
 
 ---
 
-## 10. HTTP API
+## 11. HTTP API
 
 <div align="center">
 
@@ -345,7 +430,7 @@ The `/estop` endpoint intentionally bypasses this — life safety always reachab
 
 ---
 
-## 11. Streaming Protocol
+## 12. Streaming Protocol
 
 <div align="center">
 
@@ -360,7 +445,7 @@ MJPEG was chosen over WebRTC/HLS for **sub-second latency** and **zero-plugin br
 
 ---
 
-## 12. Safety System
+## 13. Safety System
 
 Every rule is enforced before any MAVLink command leaves the Jetson.
 
@@ -400,7 +485,7 @@ Every rule is enforced before any MAVLink command leaves the Jetson.
 
 ---
 
-## 13. State Machine
+## 14. State Machine
 
 <div align="center">
 
@@ -419,7 +504,7 @@ Every rule is enforced before any MAVLink command leaves the Jetson.
 
 ---
 
-## 14. Configuration
+## 15. Configuration
 
 All tunables live in [`config/config.py`](config/config.py). Highlights:
 
@@ -444,7 +529,7 @@ All tunables live in [`config/config.py`](config/config.py). Highlights:
 
 ---
 
-## 15. ArduPilot Parameters
+## 16. ArduPilot Parameters
 
 Verified at preflight — **arming is refused** if any are wrong.
 
@@ -471,7 +556,7 @@ FENCE_ALT_MIN = 10
 
 ---
 
-## 16. Logs & Recording
+## 17. Logs & Recording
 
 <div align="center">
 
@@ -485,21 +570,6 @@ FENCE_ALT_MIN = 10
 
 JSONL events emitted: `arm`, `disarm`, `estop`, `mode_change`, `rc_override`,
 `session_rtl`, `fps_floor`, `safety_warning`, `log_open`.
-
----
-
-## 17. Remote Operation (Tailscale)
-
-```bash
-sudo tailscale up
-tailscale ip -4              # note the IP
-
-# Launch with token + LAN exposure
-python3 main.py --drone --stream-host 0.0.0.0 --stream-token MYSECRET
-
-# From any device on the tailnet:
-#   http://<tailscale-ip>:8080/?token=MYSECRET
-```
 
 ---
 
