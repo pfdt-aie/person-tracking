@@ -1,114 +1,76 @@
-# Person Tracking Drone — v10.0-modular
+# Person Tracking Drone
 
-Real-time autonomous person-following system for a quadcopter equipped with a SIYI A8 mini gimbal. Runs on Jetson Orin Nano Super / Orin NX (JetPack 6+) and communicates with an Orange Cube+ flight controller via MAVLink.
+Real-time autonomous person-following system for a quadcopter, designed
+for Jetson Orin Nano Super / Orin NX + SIYI A8 mini gimbal +
+Orange Cube+ (ArduPilot) flight controller.
+
+Gimbal-PID inner loop and proportional drone-body outer loop. EKF-smoothed
+geolocation, 4-stage tracking-loss search escalation, persistent person
+re-identification, and a full software safety stack (E-STOP, preflight
+gate, retreat behaviour, FPS floor, RC override lock-out).
+
+170 unit tests on every change.
+
+---
+
+## Tech stack
+
+| Layer | Technology |
+|---|---|
+| **Compute** | Jetson Orin Nano Super / Orin NX, JetPack 6+, CUDA 12 |
+| **Detection** | YOLOv8 via Ultralytics, TensorRT engine on GPU |
+| **Tracker** | ByteTrack (multi-object), HSV-histogram re-identification |
+| **State estimation** | Custom 4-state Extended Kalman Filter (pos N/E + vel N/E) |
+| **Gimbal control** | Discrete PID (yaw + pitch), SIYI SDK v2.0 over UDP |
+| **Drone control** | Proportional + EMA + jerk + accel limiter, pymavlink |
+| **Flight controller** | ArduCopter on Orange Cube+, GUIDED mode |
+| **Camera ingest** | RTSP H.264 → OpenCV/GStreamer (NVDEC hardware decode) |
+| **Operator UI** | MJPEG-over-HTTP, browser-native JS, no plugins |
+| **Recording** | H.264 via NVENC (`nvv4l2h264enc`), software fallback |
+| **Language** | Python 3.10 |
+| **Tests** | pytest (170 tests) |
 
 ---
 
 ## Hardware
 
-| Component | Details |
+| Component | Detail |
 |---|---|
-| **Compute** | Jetson Orin Nano Super / Orin NX (JetPack 6+) |
-| **Gimbal** | SIYI A8 mini — 192.168.144.25 UDP :37260 |
-| **Flight Controller** | Orange Cube+ (ArduPilot, GUIDED mode) |
-| **Camera** | SIYI A8 mini built-in — RTSP `rtsp://192.168.144.25:8554/main.264` |
-| **Battery** | 3S–4S LiPo |
+| Compute | Jetson Orin Nano Super / Orin NX (JetPack 6+) |
+| Gimbal + camera | SIYI A8 mini — Wi-Fi `192.168.144.25`, UDP `:37260`, RTSP `:8554/main.264` |
+| Flight controller | Orange Cube+ (ArduCopter) over USB serial `/dev/ttyACM0` @ 921600 baud |
+| Battery | 3S–6S LiPo (auto-detected; override via `--cells`) |
+| RC link | Any TX/RX bound to the FCU; required for manual override |
 
 ---
 
 ## Architecture
 
-The system runs a **two-loop hybrid control** architecture:
-
-- **Inner loop — Gimbal (30 Hz):** PID controller centers the detected person in frame by sending yaw/pitch speed commands to the SIYI A8 mini over UDP.
-- **Outer loop — Drone body (10 Hz):** When the `--drone` flag is set, a proportional controller translates gimbal pan/tilt error and GPS standoff distance into MAVLink velocity commands to the flight controller. Activates when gimbal pan exceeds 60°.
-
 ```
-RTSP stream → FrameGrabber → YOLO + ByteTrack → PersonRegistry (re-ID)
-                                                        ↓
-                                               State Machine (8 states)
-                                                   ↙        ↘
-                                          PID Gimbal    DroneController
-                                          (30 Hz)          (10 Hz)
-                                              ↓                ↓
-                                        SIYI UDP         MAVLink serial
-```
-
----
-
-## States
-
-| State | Description |
-|---|---|
-| `INITIAL_SCAN` | Power-on 3-level raster acquisition scan |
-| `TRACKING` | Person detected — gimbal actively centering |
-| `PREDICTING` | Person lost — full-speed velocity extrapolation (0–3 s) |
-| `PRED_FADE` | Fading prediction — speed tapers to 30% (3–6 s) |
-| `SEARCHING` | Velocity-biased sector scan |
-| `EXPANDING_SQUARE` | IAMSAR expanding square (after 15 s in sector scan) |
-| `LISSAJOUS` | Sinusoidal fill search — runs indefinitely (after 45 s) |
-| `WAITING` | Idle (tracking or search disabled) |
-
----
-
-## Search Pattern Escalation
-
-```
-INITIAL_SCAN (power-on)
-    ↓ person found → TRACKING
-    ↓ tracking lost
-PREDICTING (0–3 s)
-    ↓
-PRED_FADE (3–6 s)
-    ↓
-SEARCHING — sector scan, velocity-biased (≤ 15 s)
-    ↓
-EXPANDING_SQUARE — IAMSAR standard (≤ 45 s)
-    ↓
-LISSAJOUS — sinusoidal fill, indefinite
-```
-
-Search algorithms are based on published research:
-- Initial scan: MDPI Drones 2024
-- Expanding square: IAMSAR manual
-- Lissajous: Scientific Reports 2024 (irrational period ratio T_yaw/T_pitch ≈ 40/49 ≈ √2/√3)
-
----
-
-## Project Layout
-
-```
-person_tracking/
-├── main.py                      Entry point, CLI args, banner, session log
-├── tracker.py                   Central orchestrator — state machine + main loop
-├── config/
-│   └── config.py                All tunable parameters (no magic numbers elsewhere)
-├── detection/
-│   └── detector.py              YOLO TensorRT inference + ByteTrack target selection
-├── gimbal/
-│   ├── siyi_controller.py       Thread-safe UDP controller (SIYI SDK v2.0)
-│   └── auto_zoom.py             Optional auto-zoom to keep person at target frame size
-├── control/
-│   ├── pid_controller.py        Discrete PID + TargetSmoother (EMA centroid filter)
-│   ├── search_patterns.py       Four escalating search algorithms
-│   └── drone_controller.py      Hybrid outer loop — EKF + proportional drone control
-├── tracking/
-│   ├── state_machine.py         8-state FSM definitions
-│   ├── person_registry.py       HSV histogram re-identification (persistent P-IDs)
-│   ├── velocity_tracker.py      Recency-weighted velocity estimator + edge-exit detection
-│   └── person_geolocation.py   Pixel → GPS projection + 4-state EKF smoother
-├── mavlink_client/
-│   └── mavlink_client.py        Thread-safe pymavlink connection (Orange Cube+)
-├── safety/
-│   └── safety.py                Constraint enforcer: altitude, speed, geofence, watchdog, battery
-├── gcs/
-│   └── stream_server.py         MJPEG HTTP server with click-to-track web UI
-├── utils/
-│   ├── frame_grabber.py         Zero-latency threaded RTSP capture (NVDEC priority)
-│   ├── video_recorder.py        H.264 recording (NVENC priority)
-│   └── logger.py                Session log (tee stdout/stderr to timestamped file)
-└── models/
-    └── yolo26s.engine           YOLOv8 TensorRT engine (person class)
+              ┌──────────────────────┐
+RTSP H.264 →  │   FrameGrabber       │   (zero-latency NVDEC)
+              └──────────┬───────────┘
+                         ↓
+              ┌──────────────────────┐
+              │   YOLO + ByteTrack   │  (TensorRT, GPU)
+              └──────────┬───────────┘
+                         ↓
+              ┌──────────────────────┐
+              │  PersonRegistry      │  (HSV histogram re-ID)
+              └──────────┬───────────┘
+                         ↓
+              ┌──────────────────────┐
+              │  State Machine (8)   │  WAITING / SCAN / TRACK / PREDICT …
+              └────┬─────────────┬───┘
+                   │             │
+        Inner 30 Hz│             │Outer 10 Hz (--drone only)
+                   ↓             ↓
+            ┌─────────────┐ ┌─────────────────────┐
+            │ Gimbal PID  │ │  DroneController    │
+            │  + Search   │ │  + EKF + Safety     │
+            └──────┬──────┘ └──────────┬──────────┘
+                   │                   │
+              SIYI UDP            MAVLink serial
 ```
 
 ---
@@ -116,50 +78,113 @@ person_tracking/
 ## Installation
 
 ```bash
-# Python environment (JetPack 6 ships Python 3.10)
-pip install ultralytics opencv-python numpy
+# JetPack 6 ships Python 3.10. From the project root:
+pip install -r requirements.txt
 
 # Optional — drone body control
 pip install pymavlink
 
-# GStreamer hardware decode/encode (already included in JetPack 6)
-# gstreamer1.0-plugins-bad gstreamer1.0-plugins-good nvv4l2decoder nvv4l2h264enc
+# GStreamer hardware decode/encode is pre-installed on JetPack 6:
+#   gstreamer1.0-plugins-bad, nvv4l2decoder, nvv4l2h264enc
 ```
 
 ---
 
-## Running
+## Quick start
 
 ```bash
-cd person_tracking
+cd /home/ai-engineer/Akash/Tasks/Akash/AI/Jetson/person_tracking
+```
 
-# Gimbal-only mode (default)
+Three launch modes:
+
+```bash
+# 1. Gimbal-only (safest, no drone movement)
 python3 main.py
 
-# Full drone body control
+# 2. Drone body following — BENCH rehearsal (no MAVLink TX, motors off)
+python3 main.py --drone --ground-test
+
+# 3. Drone body following — LIVE flight
 python3 main.py --drone
-
-# Custom serial port / baud
-python3 main.py --drone --device /dev/ttyTHS1 --baud 115200
-
-# Custom YOLO model
-python3 main.py --model models/best.pt
-
-# With camera calibration file
-python3 main.py --calibration /path/to/calibration.yaml
 ```
+
+Open the operator UI: **`http://<jetson-ip>:8080/`**
 
 ---
 
-## Controls
+## Operating procedure
 
-### Keyboard (display window open)
+### Before every session
+
+1. Power on SIYI camera (Wi-Fi 192.168.144.x).
+2. Power on the drone (Orange Cube+ via USB serial).
+3. Power on the RC transmitter. Mode switch on **LOITER** or **STABILIZE** (NOT GUIDED yet).
+4. Launch `main.py` on the Jetson.
+5. Open `http://<jetson-ip>:8080/` in a browser.
+
+### To track a person (gimbal only)
+
+1. Click on the person in the video.
+2. Gimbal locks; HUD shows `LOCK ID N`.
+3. Click empty space (or **UNLOCK**) to release.
+
+### To enable autonomous drone following
+
+1. Pilot switches RC mode to **GUIDED**.
+2. Click **ARM ▾** in the web UI header. Checklist panel opens.
+3. Wait until **all 10 items turn green** (MAVLink, heartbeat, GUIDED, ARMED, HOME, GPS quality, sensors, fence, battery, ArduPilot params).
+4. Click **Arm Tracker**.
+5. Click on the person in the video → drone follows at `FOLLOW_STANDOFF_M = 8 m`, `FOLLOW_ALTITUDE_M = 12 m`.
+6. Click **Disarm** to stop body motion (gimbal continues).
+
+### To take manual control — three layers
+
+| Goal | Action | Effect |
+|---|---|---|
+| **Take over flight** | RC mode switch → anything not GUIDED (LOITER/STABILIZE/BRAKE/LAND/RTL) | FCU stops accepting our commands instantly. RC-override latch trips — auto-follow cannot resume until preflight + Arm again |
+| **Take over camera** | Web UI **AUTO** button → **MANUAL** | D-pad appears; arrow keys drive pan/tilt |
+| **Emergency stop** | Web UI red **E-STOP** button, or **Space** key | 1st press → BRAKE. 2nd press within 3 s → LAND. Always reachable, token-bypass |
+
+### RC link conditions required
+
+For autonomous following to be allowed: RC TX bound and healthy, mode on **GUIDED**, throttle above failsafe trigger.
+
+For manual recovery (always available): transmitter must stay powered in pilot's hand throughout the flight. Any mode flip off GUIDED = instant takeover.
+
+---
+
+## CLI reference
+
+```
+python3 main.py [--drone] [--ground-test] [--cells N]
+                [--device PATH] [--baud N]
+                [--model PATH] [--calibration PATH] [--detect-device DEV]
+                [--stream-host HOST] [--stream-token TOKEN]
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--drone` | off | Enable MAVLink drone-body following |
+| `--ground-test` | off | Dry-run: pipeline runs but no MAVLink TX |
+| `--cells N` | 0 (auto) | Force battery cell count (3–6). Use on partially-charged packs |
+| `--device PATH` | `/dev/ttyACM0` | MAVLink serial device |
+| `--baud N` | `921600` | Serial baud rate |
+| `--model PATH` | `models/yolo26s.engine` | YOLO TensorRT engine |
+| `--detect-device DEV` | `auto` | `auto` / `cpu` / `cuda:0` |
+| `--calibration PATH` | empty | OpenCV camera calibration YAML (else auto-estimate from HFOV=81°) |
+| `--stream-host HOST` | `127.0.0.1` | Stream bind address. Use `0.0.0.0` for LAN / Tailscale |
+| `--stream-token TOKEN` | empty | Auth token required on control endpoints when set |
+
+---
+
+## Keyboard (display window open)
 
 | Key | Action |
 |---|---|
 | `q` | Quit |
 | `t` | Toggle tracking on/off |
-| `r` | Center gimbal + reset zoom to 1× |
+| `r` | Center gimbal + reset zoom |
 | `s` | Toggle search on/off |
 | `i` | Restart initial acquisition scan |
 | `d` | Toggle display window |
@@ -167,129 +192,259 @@ python3 main.py --calibration /path/to/calibration.yaml
 | `a` | Toggle auto-zoom |
 | `v` | Toggle video recording |
 | `l` | Toggle live stream |
-| `+` / `-` | Increase / decrease adaptive Kp gain |
-| `[` / `]` | Adjust max gimbal speed |
+| `+` / `-` | Adaptive Kp gain |
+| `[` / `]` | Max gimbal speed |
+| `m` | Toggle AUTO / MANUAL |
+| `←↑↓→` | Manual gimbal (only in MANUAL) |
 
-### Terminal / SSH (headless)
+---
+
+## Terminal commands (headless / SSH)
 
 ```
-track <id>   Lock onto persistent person ID
-unlock       Release lock, revert to largest-person mode
-ids          Print all detected IDs + positions
+track <id>   Lock to persistent person ID
+unlock       Release lock
+ids          Print currently detected IDs
 q            Quit
 ```
 
-### Web UI
+---
 
-Browse to `http://<jetson-ip>:8080/` (works over Tailscale).
+## HTTP endpoints
 
-- Click on a person to lock tracking to that person
-- Click empty space to unlock
-- Zoom in / out buttons
+| Endpoint | Auth | Description |
+|---|---|---|
+| `/` | — | Operator HTML page |
+| `/stream` | — | MJPEG over HTTP (`multipart/x-mixed-replace`, JPEG frames) |
+| `/status` | — | Live telemetry JSON: mode, GPS, batt, fence, RC-override, FPS, tracking-loss dt |
+| `/preflight` | — | Preflight checklist JSON: `{items: [...], all_ok: bool, armed: bool}` |
+| `/click?x=&y=` | token | Lock to normalised (x, y) |
+| `/unlock` | token | Release lock |
+| `/mode?set=auto\|manual` | token | Set tracker mode |
+| `/gimbal?dir=up\|down\|left\|right\|stop` | token | Manual gimbal nudge (MANUAL only) |
+| `/zoom_in` / `/zoom_out` | token | Gimbal zoom |
+| `/arm_tracker?on=true\|false` | token | Arm or disarm drone-body following |
+| `/estop` | **always allowed** | First press → BRAKE. Within 3 s → LAND. Life safety |
 
-**Direct endpoints:**
-
-| Endpoint | Description |
-|---|---|
-| `/stream` | Raw MJPEG (VLC / `<img src>`) |
-| `/click?x=0.42&y=0.61` | Lock to normalised coordinates |
-| `/unlock` | Release lock |
-| `/status` | JSON `{lock_id, ids}` |
-| `/zoom_in` / `/zoom_out` | Gimbal zoom |
+When `--stream-token` is set, control endpoints require `?token=YOURSECRET`. The `/estop` endpoint intentionally bypasses this.
 
 ---
 
-## Key Configuration (`config/config.py`)
+## Streaming protocol
+
+| Leg | Protocol | Notes |
+|---|---|---|
+| Camera → Jetson | RTSP / H.264 | `rtsp://192.168.144.25:8554/main.264`, NVDEC hardware decode |
+| Jetson → operator browser | MJPEG over HTTP | `Content-Type: multipart/x-mixed-replace`. Two qualities served: 720p (`?q=hi`) and 480p (`?q=lo`). 25 fps cap |
+
+MJPEG was chosen over WebRTC/HLS for sub-second latency and zero-plugin browser support.
+
+---
+
+## State machine
+
+| State | Trigger | Description |
+|---|---|---|
+| `INITIAL_SCAN` | Power-on | 3-level raster acquisition (MDPI Drones 2024) |
+| `TRACKING` | Person detected | Gimbal PID centring |
+| `PREDICTING` | Lost 0–3 s | Full-speed velocity extrapolation |
+| `PRED_FADE` | Lost 3–6 s | Tapering prediction (down to 30 %) |
+| `SEARCHING` | Lost ≥ 6 s | Velocity-biased sector scan |
+| `EXPANDING_SQUARE` | Sector timeout (15 s) | IAMSAR expanding square |
+| `LISSAJOUS` | Expand timeout (45 s) | Sinusoidal fill (T_yaw/T_pitch ≈ √2/√3) |
+| `WAITING` | Tracking disabled | Idle |
+
+---
+
+## Safety stack
+
+Every safety rule is enforced before any MAVLink command leaves the Jetson.
+
+| Layer | Rule |
+|---|---|
+| **Altitude** | All commands clamped to `[MIN_ALT_M, MAX_ALT_M] = [10, 80] m` |
+| **Speed** | Horizontal velocity ≤ `MAX_TRACKING_SPEED_MS = 5 m/s`, vertical ≤ 2.5 m/s |
+| **Acceleration** | `MAX_ACCEL_MS2 = 2.0 m/s²` after jerk limiter |
+| **Geofence (app)** | 500 m circular, checked on both current position AND commanded target |
+| **Geofence (FCU)** | Verified at preflight: `FENCE_ENABLE=1`, `FENCE_RADIUS ≥ app radius`, `FENCE_ALT_MAX ≥ ceiling` |
+| **HOME keep-out** | 5 m no-fly cylinder around launch point |
+| **MAVLink watchdog** | Heartbeat stale > 2.0 s → stop. Warn at 1.0 s |
+| **GPS quality** | Fix ≥ 3D, HDOP ≤ 1.5, sats ≥ 10, EKF horizontal variance ≤ 1.0 |
+| **EKF jump reject** | Measurements > 10 m from current state discarded |
+| **Battery critical** | Per-cell V < 3.5 → RTL with retry. Cell count override via `--cells` |
+| **Body confirm** | 5 consecutive detections required before drone body moves |
+| **FPS floor** | Body holds if effective YOLO FPS < 8 |
+| **Session timer** | Auto RTL after `MAX_FLIGHT_TIME_S = 600 s` |
+| **Retreat + hysteresis** | Active 1 m/s retreat when sep < 4 m, resume above 5.5 m |
+| **RC override** | GUIDED → other mode latches. Cleared only by re-arm after preflight |
+| **E-STOP** | Web button + Space key. BRAKE → LAND escalation |
+
+### Tracking-loss failsafe ladder
+
+```
+0–2 s   → EKF prediction, drone keeps velocity
+2–5 s   → Zero velocity (decelerate)
+5–15 s  → LOITER command (FCU holds)
+> 15 s  → Stay in LOITER. Operator decides. Never auto-RTL on tracking loss alone
+```
+
+---
+
+## ArduPilot parameters
+
+Required on the flight controller. Verified at preflight; arming refused if any are wrong.
+
+```
+GUID_TIMEOUT     > 0       # GUIDED-mode command-loss timeout
+FENCE_ENABLE     = 1       # Onboard geofence ON
+FENCE_RADIUS    >= 500     # ≥ app GEOFENCE_RADIUS_M
+FENCE_ALT_MAX   >= 80      # ≥ app MAX_ALT_M
+RTL_ALT         >= 2000    # cm, i.e. ≥ 20 m
+BATT_FS_LOW_ACT >= 2       # 2 = RTL, 3 = LAND
+FS_GCS_ENABLE    = 1       # GCS-heartbeat failsafe ON
+```
+
+Recommended:
+
+```
+WPNAV_SPEED   = 500     # cm/s = 5 m/s
+WPNAV_ACCEL   = 150     # cm/s²
+PSC_JERK_XY   = 3.0     # m/s³
+FENCE_ALT_MIN = 10
+```
+
+---
+
+## Key configuration (`config/config.py`)
 
 | Parameter | Default | Description |
 |---|---|---|
-| `MODEL_PATH` | `models/yolo26s.engine` | YOLO TensorRT engine path |
-| `CONF_THRESHOLD` | `0.45` | Detection confidence threshold |
-| `ADAPT_KP_MIN/MAX` | `12.0 / 30.0` | Adaptive PID gain range |
-| `ADAPT_SPEED_MIN/MAX` | `35 / 65` | Gimbal speed range |
-| `PREDICT_DURATION` | `3.0 s` | Full-speed velocity prediction after target loss |
-| `PRED_FADE_DURATION` | `3.0 s` | Fading prediction phase duration |
-| `EDGE_EXIT_BOOST` | `1.5×` | Speed multiplier when person exits frame edge |
-| `SECTOR_SEARCH_TIMEOUT` | `15 s` | Escalate to expanding square after this |
-| `EXPAND_SEARCH_TIMEOUT` | `45 s` | Escalate to Lissajous after this |
-| `AUTO_ZOOM_ENABLED` | `False` | Auto-adjust zoom to keep person at 40% frame height |
-| `FOLLOW_ALTITUDE_M` | `12 m` | Target AGL altitude (drone mode) |
-| `FOLLOW_STANDOFF_M` | `8.0 m` | Horizontal standoff from person (drone mode) |
-| `MAX_TRACKING_SPEED_MS` | `5.0 m/s` | Hard velocity cap — safety critical |
-| `MIN_ALT_M / MAX_ALT_M` | `10 / 80 m` | Altitude floor/ceiling — safety critical |
-| `STREAM_PORT` | `8080` | MJPEG HTTP server port |
-| `AUTO_RECORD` | `True` | Start recording automatically on launch |
-| `BATT_WARN_V / BATT_CRIT_V` | `11.5 / 10.5 V` | Battery warning thresholds |
+| `MODEL_PATH` | `models/yolo26s.engine` | YOLO engine path |
+| `CONF_THRESHOLD` | `0.45` | Detection confidence |
+| `FOLLOW_ALTITUDE_M` | `12 m` | Target AGL altitude |
+| `FOLLOW_STANDOFF_M` | `8 m` | Horizontal offset from subject |
+| `MIN_PERSON_DRONE_SEP_M` | `4 m` | Retreat trigger |
+| `RETREAT_HYSTERESIS_M` | `1.5 m` | Re-engage buffer |
+| `RETREAT_SPEED_MS` | `1.0 m/s` | Retreat velocity |
+| `BODY_MOVE_CONFIRM_FRAMES` | `5` | Frames before body moves |
+| `MIN_TRACKING_FPS` | `8.0` | FPS floor for body motion |
+| `MAX_FLIGHT_TIME_S` | `600 s` | Auto-RTL deadline |
+| `HEARTBEAT_WATCHDOG_S` | `2.0 s` | MAVLink HB timeout |
+| `BEARING_LATCH_S` | `1.0 s` | Sustained motion required to switch standoff bearing |
+| `EKF_MAX_JUMP_M` | `10 m` | Measurement-rejection threshold |
+| `STREAM_PORT` | `8080` | MJPEG HTTP port |
+| `STREAM_MAX_FPS` | `25` | Stream FPS cap |
+| `AUTO_RECORD` | `True` | Auto-record on launch |
 
 ---
 
-## Safety System
+## Logs & recording
 
-Five constraints are **never bypassed**:
+| Output | Path |
+|---|---|
+| Session stdout/stderr (tee) | `logs/gimbal_track_YYYY-MM-DD_HH-MM-SS.log` |
+| Structured flight events (JSONL) | `logs/flight_YYYYMMDD_HHMMSS.jsonl` |
+| Video recording (H.264 MP4) | `recordings/track_YYYY-MM-DD_HH-MM-SS_WxH.mp4` |
 
-1. **Altitude floor/ceiling** — all commands clamped to `[MIN_ALT_M, MAX_ALT_M]`
-2. **Speed cap** — horizontal velocity hard-limited to `MAX_TRACKING_SPEED_MS` (5 m/s)
-3. **Geofence** — 500 m circular boundary; outside → zero velocity
-4. **MAVLink watchdog** — heartbeat stale → stop sending commands
-5. **Battery critical** — per-cell voltage < 3.5 V → RTL
-
-**Tracking loss failsafe (drone mode):**
-
-```
-0–2 s   → EKF prediction, drone holds velocity
-2–5 s   → Zero velocity (drone decelerates)
-5–15 s  → LOITER command
-> 15 s  → Stay in LOITER (no auto-RTL on tracking loss alone)
-```
+Events emitted to the JSONL log: `arm`, `disarm`, `estop`, `mode_change`, `rc_override`, `session_rtl`, `fps_floor`, `safety_warning`, `log_open`.
 
 ---
 
-## ArduPilot Parameters
+## Tailscale remote operation
 
-Set these on the flight controller before enabling drone mode:
-
-```
-GUID_TIMEOUT   = 5       # stop if no velocity command for 5 s
-WPNAV_SPEED    = 500     # cm/s (5 m/s)
-WPNAV_ACCEL    = 150     # cm/s²
-PSC_JERK_XY    = 3.0     # m/s³
-FENCE_ENABLE   = 1
-FENCE_ALT_MIN  = 10      # m AGL
-```
-
----
-
-## Person Re-Identification
-
-The `PersonRegistry` assigns stable **P-IDs** that persist across the full session, even when a person temporarily leaves frame and re-enters.
-
-- Each detection crop is hashed to a 48-bin HSV colour histogram
-- New detections are matched against the gallery via cosine similarity (threshold 0.80)
-- Gallery entries not seen for 300 s are pruned
-
-Re-ID runs fully on CPU using `numpy` histogram comparisons — no separate model required.
-
----
-
-## Video & Streaming
-
-**Recording:** Auto-starts on launch. Frames are encoded with H.264:
-- Hardware path: Jetson NVENC via GStreamer (`nvv4l2h264enc`) — ~5% CPU at 1080p@30
-- Software fallback: `x264enc`, then OpenCV `mp4v`
-
-Files saved to `recordings/track_YYYY-MM-DD_HH-MM-SS_WxH.mp4`.
-
-**Live stream:** MJPEG over HTTP on port 8080. The web UI uses boundary-based MJPEG parsing in JavaScript — frames are dropped if the browser is busy rendering, preventing lag accumulation.
-
-**Tailscale remote access:**
 ```bash
 sudo tailscale up
-tailscale ip -4   # note the IP
-# browse to http://<tailscale-ip>:8080/ from anywhere
+tailscale ip -4              # note the IP
+
+# Launch with token + LAN exposure
+python3 main.py --drone --stream-host 0.0.0.0 --stream-token MYSECRET
+
+# From any device on the tailnet:
+#   http://<tailscale-ip>:8080/?token=MYSECRET
 ```
 
 ---
 
-## Logs
+## Tests
 
-Session logs are saved to `logs/gimbal_track_YYYY-MM-DD_HH-MM-SS.log`. All `print()` output is tee'd to both the terminal and the log file automatically.
+```bash
+pytest -q
+# 170 passed
+```
+
+The suite covers safety (`test_safety.py`, `test_preflight.py`, `test_param_verifier.py`,
+`test_home_keepout.py`, `test_retreat.py`, `test_body_confirm.py`,
+`test_ekf_jump.py`, `test_accel_cap.py`, `test_bearing_hysteresis.py`,
+`test_gps_quality.py`, `test_estop.py`, `test_rc_override.py`,
+`test_fps_floor.py`, `test_session_rtl.py`, `test_cells_override.py`,
+`test_ground_test_mode.py`, `test_flight_log.py`, `test_status_telemetry.py`),
+tracking (`test_target_detection.py`, `test_target_selector.py`,
+`test_tracker_web_click.py`, `test_standoff.py`, `test_drone_target_geofence.py`),
+control (`test_pid.py`, `test_mavlink_ack.py`), and web UI (`test_stream_token_html.py`, `test_query_parse.py`).
+
+---
+
+## Project layout
+
+```
+person_tracking/
+├── main.py                         Entry point — CLI args, banner, log setup
+├── tracker.py                      Orchestrator — state machine + main loop
+├── config/
+│   ├── config.py                   Tunable parameters
+│   └── settings.py                 Immutable Settings dataclass
+├── detection/
+│   └── detector.py                 YOLO TensorRT + ByteTrack
+├── gimbal/
+│   ├── siyi_controller.py          SIYI SDK v2.0 over UDP
+│   └── auto_zoom.py                Optional auto-zoom
+├── control/
+│   ├── pid_controller.py           Discrete PID + EMA centroid smoother
+│   ├── search_patterns.py          4-stage search escalation
+│   └── drone_controller.py         Outer loop — EKF + safety + retreat
+├── tracking/
+│   ├── state_machine.py            8-state FSM
+│   ├── person_registry.py          HSV histogram re-ID
+│   ├── velocity_tracker.py         Recency-weighted velocity
+│   ├── person_geolocation.py       Pixel → GPS + 4-state EKF
+│   ├── tracker_state.py            Shared mutable state
+│   ├── target_selector.py          Target selection (lock / largest)
+│   ├── target_detection.py         TargetDetection dataclass
+│   ├── gimbal_state_machine.py     Gimbal FSM
+│   └── operator_input.py           Keyboard / terminal handler
+├── mavlink_client/
+│   ├── mavlink_client.py           Thread-safe pymavlink wrapper
+│   └── param_verifier.py           FCU parameter verifier (S2.3)
+├── safety/
+│   ├── safety.py                   Altitude, speed, geofence, watchdog, battery, keep-out
+│   └── preflight.py                Preflight checklist (S1.3)
+├── gcs/
+│   ├── stream_server.py            MJPEG HTTP + click-to-track web UI + E-STOP
+│   └── web_control_adapter.py      Web callback handlers
+├── mission/
+│   ├── hud_renderer.py             On-screen HUD
+│   ├── recording_manager.py        Recording lifecycle
+│   └── stream_adapter.py           Stream-loop adapter
+├── utils/
+│   ├── frame_grabber.py            RTSP capture (NVDEC priority)
+│   ├── video_recorder.py           H.264 record (NVENC priority)
+│   ├── flight_log.py               JSONL structured event log (S3.2)
+│   └── logger.py                   stdout tee
+├── tests/                          170 pytest tests
+└── models/
+    └── yolo26s.engine              YOLOv8 TensorRT engine
+```
+
+---
+
+## Shutdown
+
+```
+Ctrl-C       (in the terminal running main.py)
+   — or —
+q + Enter    (terminal mode)
+   — or —
+q key        (display mode)
+```
+
+Session log + flight log + video recording are all closed cleanly on exit.
