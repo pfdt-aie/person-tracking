@@ -107,6 +107,10 @@ class MAVLinkClient:
         self._armed:        bool  = False
         self._mode:         str   = "UNKNOWN"
         self._hb_time:      float = 0.0    # monotonic timestamp of last heartbeat
+        self._global_pos_t:  float = 0.0
+        self._gps_raw_t:     float = 0.0
+        self._ekf_status_t:  float = 0.0
+        self._sys_status_t:  float = 0.0
 
         self._home_lat:     float = 0.0
         self._home_lon:     float = 0.0
@@ -133,6 +137,11 @@ class MAVLinkClient:
         # took control, autopilot failsafe, etc.). Cleared only by an
         # explicit arm-tracker request after preflight passes again.
         self._rc_override_latched: bool = False
+
+        # RC link health (preflight gate — transmitter must be ON before takeoff)
+        self._rc_last_t:     float = 0.0   # monotonic ts of last RC_CHANNELS
+        self._rc_chancount:  int   = 0
+        self._rc_rssi:       int   = 0     # 0–255 (RC_CHANNELS.rssi)
 
         # S1.2: ground-test (dry-run) mode — when True, no TX is emitted.
         self._ground_test: bool = bool(getattr(self._s, "ground_test", False))
@@ -291,12 +300,14 @@ class MAVLinkClient:
                         self._vel_d = msg.vz
 
                     elif t == "GLOBAL_POSITION_INT":
+                        self._global_pos_t = time.monotonic()
                         self._lat     = msg.lat  / 1e7
                         self._lon     = msg.lon  / 1e7
                         self._alt_msl = msg.alt  / 1000.0
                         self._alt_rel = msg.relative_alt / 1000.0
 
                     elif t == "GPS_RAW_INT":
+                        self._gps_raw_t = time.monotonic()
                         self._gps_fix = msg.fix_type
                         self._n_sats  = msg.satellites_visible
                         # eph is the horizontal-position uncertainty in cm.
@@ -306,13 +317,22 @@ class MAVLinkClient:
                         self._gps_hdop = 99.99 if eph >= 65535 else eph / 100.0
 
                     elif t == "EKF_STATUS_REPORT":
+                        self._ekf_status_t = time.monotonic()
                         # Worst-case horizontal variance — combined N/E.
                         self._ekf_pos_var = float(
                             getattr(msg, "pos_horiz_variance", 0.0)
                         )
                         self._ekf_status_seen = True
 
+                    elif t == "RC_CHANNELS":
+                        # FCU forwards RC_CHANNELS whenever the receiver
+                        # delivers a frame. Stop arrival = RC link lost.
+                        self._rc_last_t    = time.monotonic()
+                        self._rc_chancount = int(getattr(msg, "chancount", 0))
+                        self._rc_rssi      = int(getattr(msg, "rssi", 0))
+
                     elif t == "SYS_STATUS":
+                        self._sys_status_t     = time.monotonic()
                         self._vbat_mv          = msg.voltage_battery
                         self._sensors_health   = msg.onboard_control_sensors_health   # C3
                         self._sensors_present  = msg.onboard_control_sensors_present  # C3
@@ -503,6 +523,44 @@ class MAVLinkClient:
         with self._lock:
             return self._ekf_status_seen
 
+    @staticmethod
+    def _fresh(ts: float, max_age_s: float | None = None) -> bool:
+        if ts <= 0.0:
+            return False
+        limit = cfg.TELEMETRY_STALE_S if max_age_s is None else max_age_s
+        return (time.monotonic() - ts) <= limit
+
+    def is_global_position_fresh(self) -> bool:
+        with self._lock:
+            return self._fresh(self._global_pos_t)
+
+    def is_gps_raw_fresh(self) -> bool:
+        with self._lock:
+            return self._fresh(self._gps_raw_t)
+
+    def is_ekf_status_fresh(self) -> bool:
+        with self._lock:
+            return self._fresh(self._ekf_status_t)
+
+    def is_sys_status_fresh(self) -> bool:
+        with self._lock:
+            return self._fresh(self._sys_status_t)
+
+    def get_telemetry_age_s(self, name: str) -> float:
+        """Return age of a telemetry stream, or inf if never received."""
+        key = name.lower()
+        with self._lock:
+            ts = {
+                "global_position_int": self._global_pos_t,
+                "gps_raw_int": self._gps_raw_t,
+                "ekf_status_report": self._ekf_status_t,
+                "sys_status": self._sys_status_t,
+                "rc_channels": self._rc_last_t,
+            }.get(key, 0.0)
+        if ts <= 0.0:
+            return float("inf")
+        return time.monotonic() - ts
+
     def is_gps_ok(self) -> bool:
         """Return True if GPS quality is sufficient for autonomous flight (S2.1).
 
@@ -510,21 +568,26 @@ class MAVLinkClient:
           - fix_type >= GPS_MIN_FIX_TYPE
           - HDOP    <= GPS_MAX_HDOP
           - sats    >= GPS_MIN_SATS
-          - EKF horizontal variance <= EKF_MAX_VARIANCE (when reported)
+          - GLOBAL_POSITION_INT, GPS_RAW_INT, and EKF_STATUS_REPORT are fresh
+          - EKF horizontal variance <= EKF_MAX_VARIANCE
         """
         with self._lock:
             fix       = self._gps_fix
             hdop      = self._gps_hdop
             sats      = self._n_sats
             ekf_var   = self._ekf_pos_var
-            ekf_seen  = self._ekf_status_seen
+            global_ok = self._fresh(self._global_pos_t)
+            gps_ok    = self._fresh(self._gps_raw_t)
+            ekf_ok    = self._fresh(self._ekf_status_t)
+        if not (global_ok and gps_ok and ekf_ok):
+            return False
         if fix < cfg.GPS_MIN_FIX_TYPE:
             return False
         if hdop > cfg.GPS_MAX_HDOP:
             return False
         if sats < cfg.GPS_MIN_SATS:
             return False
-        if ekf_seen and ekf_var > cfg.EKF_MAX_VARIANCE:
+        if ekf_var > cfg.EKF_MAX_VARIANCE:
             return False
         return True
 
@@ -556,6 +619,39 @@ class MAVLinkClient:
         with self._lock:
             return self._fence_breached
 
+    def is_rc_connected(self) -> bool:
+        """Return True if RC_CHANNELS has been seen recently (transmitter ON).
+
+        Used as a preflight gate — takeoff is refused without a live RC
+        link. False if no RC_CHANNELS has ever arrived, or the last one
+        is older than RC_WATCHDOG_S, or chancount is below RC_MIN_CHANNELS.
+        """
+        with self._lock:
+            last  = self._rc_last_t
+            count = self._rc_chancount
+        if last <= 0.0:
+            return False
+        if (time.monotonic() - last) > cfg.RC_WATCHDOG_S:
+            return False
+        return count >= cfg.RC_MIN_CHANNELS
+
+    def get_rc_age_s(self) -> float:
+        """Seconds since the last RC_CHANNELS message. inf if never seen."""
+        with self._lock:
+            last = self._rc_last_t
+        if last <= 0.0:
+            return float("inf")
+        return time.monotonic() - last
+
+    def get_rc_channel_count(self) -> int:
+        with self._lock:
+            return self._rc_chancount
+
+    def get_rc_rssi(self) -> int:
+        """RC receiver RSSI, 0–255 (FCU-reported)."""
+        with self._lock:
+            return self._rc_rssi
+
     def is_rc_override_active(self) -> bool:
         """Return True if a GUIDED→other transition has been observed (S3.6).
 
@@ -573,13 +669,13 @@ class MAVLinkClient:
 
     def is_sensors_healthy(self) -> bool:
         """True if gyro, accel, mag, and baro all report healthy in SYS_STATUS.
-
-        Returns True before first SYS_STATUS arrives to avoid blocking startup.
         """
         with self._lock:
+            if not self._fresh(self._sys_status_t):
+                return False
             required = _CRITICAL_SENSORS & self._sensors_present
             if required == 0:
-                return True   # no SYS_STATUS yet — don't block startup
+                return False
             return bool((self._sensors_health & required) == required)
 
     # ------------------------------------------------------------------
@@ -761,6 +857,8 @@ class MAVLinkClient:
                 f"vel=({vN:.2f},{vE:.2f},{vD:.2f})"
             )
             return
+        if not self._position_target_allowed(pN, pE, pD, vN, vE, vD, type_mask):
+            return
         try:
             self._mav.mav.set_position_target_local_ned_send(
                 0,                                          # time_boot_ms (unused)
@@ -775,6 +873,50 @@ class MAVLinkClient:
             )
         except Exception as exc:
             print(f"[MAVLink] send_position_target error: {exc}")
+
+    def _position_target_allowed(
+        self,
+        pN: float, pE: float, pD: float,
+        vN: float, vE: float, vD: float,
+        type_mask: int,
+    ) -> bool:
+        """Last-chance guard for live position-target TX paths.
+
+        Unit tests and disconnected setup helpers may seed _mav directly
+        without running connect(), so strict live-flight state checks are
+        relaxed only when no heartbeat has ever been received. If heartbeat
+        telemetry exists but the RX loop is down, fail closed.
+        """
+        if self._mav is None:
+            return False
+        hb_t = self.get_last_heartbeat_time()
+        if not self._running and hb_t <= 0.0:
+            return True
+        is_zero_hold = (
+            type_mask == _MASK_VEL_ONLY
+            and abs(vN) < 1e-6 and abs(vE) < 1e-6 and abs(vD) < 1e-6
+        )
+        if is_zero_hold:
+            return True
+        if not self._running:
+            print("[MAVLink] WARN: command dropped — RX loop not running")
+            return False
+        if not self._safety.watchdog_heartbeat(hb_t):
+            print("[MAVLink] WARN: command dropped — heartbeat stale")
+            return False
+        if self.get_mode() != "GUIDED":
+            print(f"[MAVLink] WARN: command dropped — mode is {self.get_mode()}")
+            return False
+        if not self.is_armed():
+            print("[MAVLink] WARN: command dropped — FCU disarmed")
+            return False
+        if self.is_rc_override_active():
+            print("[MAVLink] WARN: command dropped — RC override latched")
+            return False
+        if not self.is_rc_connected():
+            print("[MAVLink] WARN: command dropped — RC link lost")
+            return False
+        return True
 
     # ------------------------------------------------------------------
     #  Emergency / mode commands

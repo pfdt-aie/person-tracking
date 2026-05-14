@@ -1,6 +1,7 @@
 """S2.1 — GPS quality gate (fix type + HDOP + sats + EKF variance)."""
 import pathlib
 import sys
+import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
@@ -24,6 +25,10 @@ def _client(**state) -> MAVLinkClient:
     c._n_sats        = state.get("sats", 14)
     c._ekf_pos_var   = state.get("ekf_var",  0.2)
     c._ekf_status_seen = state.get("ekf_seen", True)
+    now = time.monotonic()
+    c._global_pos_t  = state.get("global_t", now)
+    c._gps_raw_t     = state.get("gps_raw_t", now)
+    c._ekf_status_t  = state.get("ekf_t", now if c._ekf_status_seen else 0.0)
     return c
 
 
@@ -47,9 +52,13 @@ def test_high_ekf_variance_fails():
     assert _client(ekf_var=cfg.EKF_MAX_VARIANCE + 0.5).is_gps_ok() is False
 
 
-def test_ekf_variance_ignored_when_unreported():
-    # ekf_status_seen=False, variance can be huge — gate should not enforce it.
-    assert _client(ekf_var=9.0, ekf_seen=False).is_gps_ok() is True
+def test_ekf_status_required():
+    assert _client(ekf_seen=False).is_gps_ok() is False
+
+
+def test_stale_gps_stream_fails():
+    old = time.monotonic() - (cfg.TELEMETRY_STALE_S + 1.0)
+    assert _client(gps_raw_t=old).is_gps_ok() is False
 
 
 def test_boundary_hdop_exactly_at_threshold_passes():

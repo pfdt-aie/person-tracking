@@ -121,6 +121,7 @@ class DroneController:
         # resets when the drone is disarmed (drone_tracking_enabled=False).
         self._session_start_t: float = -1.0
         self._session_rtl_issued: bool = False
+        self._rc_loss_loiter_issued: bool = False
 
         # S3.5 — detection frame timestamps for FPS estimation.
         self._fps_times: deque = deque(maxlen=cfg.FPS_WINDOW_SIZE)
@@ -258,6 +259,19 @@ class DroneController:
                 self._mode_warn_t = now
                 print("[Drone] RC override latched — re-arm tracker to resume")
             return 0.0
+
+        # --- S3.7: Runtime RC-loss gate ---
+        # Preflight requires RC before takeoff; this keeps enforcing it after
+        # arm. If the pilot link drops, stop autonomy and let ArduPilot hold.
+        if not self._mav.is_rc_connected():
+            self._mav.send_zero_velocity()
+            if not self._rc_loss_loiter_issued:
+                print("[Drone] RC link lost — LOITER issued, re-arm required")
+                get_flight_log().event("rc_loss", action="loiter")
+                self._mav.send_loiter()
+                self._rc_loss_loiter_issued = True
+            return 0.0
+        self._rc_loss_loiter_issued = False
 
         # --- A2: ARM state gate ---
         if not self._mav.is_armed():
@@ -808,4 +822,5 @@ class DroneController:
         self._bearing_init  = False
         self._session_start_t   = -1.0
         self._session_rtl_issued = False
+        self._rc_loss_loiter_issued = False
         self._ekf.reset()

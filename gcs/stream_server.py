@@ -444,6 +444,8 @@ function syncTelemetry(d) {{
   if (d.drone_enabled === false) {{ el.textContent = ''; return; }}
   const parts = [];
   parts.push((d.mode_fcu || '?') + (d.armed_fcu ? '·ARM' : ''));
+  parts.push(d.rc_connected ? ('RC' + (d.rc_rssi > 0 ? '·' + d.rc_rssi : ''))
+                            : 'RC-OFF');
   if (d.rc_override) parts.push('RC-OVR');
   if (d.fence_breach) parts.push('FENCE');
   parts.push('GPS ' + fmt(d.gps_fix) + '/' + fmt(d.gps_sats) +
@@ -454,7 +456,8 @@ function syncTelemetry(d) {{
     parts.push('lost ' + d.tracking_loss_s + 's');
   if (d.ground_test) parts.push('DRY-RUN');
   el.textContent = parts.join(' · ');
-  el.style.color = (d.rc_override || d.fence_breach) ? '#ff8080' : '#7fff7f';
+  el.style.color = (d.rc_override || d.fence_breach || !d.rc_connected)
+                   ? '#ff8080' : '#7fff7f';
 }}
 setInterval(() => {{
   fetch('/status').then(r => r.json()).then(d => {{

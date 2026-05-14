@@ -23,6 +23,14 @@ class _FakeMav:
             "sensors":   True,
             "fence":     False,
             "voltage":   16.0,
+            "rc_connected": True,
+            "rc_count":     8,
+            "rc_rssi":      210,
+            "rc_age":       0.2,
+            "global_fresh":  True,
+            "gps_raw_fresh": True,
+            "ekf_fresh":     True,
+            "sys_fresh":     True,
         }
         self._kw.update(kw)
 
@@ -34,13 +42,24 @@ class _FakeMav:
     def is_gps_ok(self):
         return (self._kw["gps_fix"] >= cfg.GPS_MIN_FIX_TYPE
                 and self._kw["hdop"] <= cfg.GPS_MAX_HDOP
-                and self._kw["sats"] >= cfg.GPS_MIN_SATS)
+                and self._kw["sats"] >= cfg.GPS_MIN_SATS
+                and self._kw["global_fresh"]
+                and self._kw["gps_raw_fresh"]
+                and self._kw["ekf_fresh"])
     def get_gps_fix(self):             return self._kw["gps_fix"]
     def get_gps_hdop(self):            return self._kw["hdop"]
     def get_sat_count(self):           return self._kw["sats"]
+    def is_global_position_fresh(self): return self._kw["global_fresh"]
+    def is_gps_raw_fresh(self):         return self._kw["gps_raw_fresh"]
+    def is_ekf_status_fresh(self):      return self._kw["ekf_fresh"]
+    def is_sys_status_fresh(self):      return self._kw["sys_fresh"]
     def is_sensors_healthy(self):      return self._kw["sensors"]
     def is_fence_breached(self):       return self._kw["fence"]
     def get_battery_voltage(self):     return self._kw["voltage"]
+    def is_rc_connected(self):         return self._kw["rc_connected"]
+    def get_rc_age_s(self):            return self._kw["rc_age"]
+    def get_rc_channel_count(self):    return self._kw["rc_count"]
+    def get_rc_rssi(self):             return self._kw["rc_rssi"]
 
 
 class _FakeSafety:
@@ -112,6 +131,22 @@ def test_bad_gps_fix_fails():
     assert any("GPS" in c.name for c in failing)
 
 
+def test_stale_gps_telemetry_blocks_arm():
+    pf = _pf({"global_fresh": False})
+    items = {c.name: c for c in pf.run()}
+    gps = items["GPS fix OK"]
+    assert gps.ok is False
+    assert "GLOBAL_POSITION_INT stale/missing" in gps.message
+
+
+def test_stale_sys_status_blocks_arm():
+    pf = _pf({"sys_fresh": False, "sensors": False})
+    items = {c.name: c for c in pf.run()}
+    sensors = items["IMU / mag / baro healthy"]
+    assert sensors.ok is False
+    assert "SYS_STATUS stale/missing" in sensors.message
+
+
 def test_no_voltage_fails_battery_check():
     pf = _pf({"voltage": 0.0})
     failing = [c for c in pf.run() if not c.ok]
@@ -140,6 +175,39 @@ def test_param_failure_blocks_all_pass():
     assert pf.all_pass() is False
     items = {c.name: c for c in pf.run()}
     assert items["ArduPilot params correct"].ok is False
+
+
+def test_rc_disconnected_blocks_arm():
+    pf = _pf({"rc_connected": False, "rc_age": 5.0, "rc_count": 0})
+    items = {c.name: c for c in pf.run()}
+    rc = items["RC transmitter connected"]
+    assert rc.ok is False
+    assert "no RC_CHANNELS" in rc.message
+    assert pf.all_pass() is False
+
+
+def test_rc_never_seen_shows_explicit_message():
+    pf = _pf({"rc_connected": False, "rc_age": float("inf"), "rc_count": 0})
+    items = {c.name: c for c in pf.run()}
+    rc = items["RC transmitter connected"]
+    assert rc.ok is False
+    assert "never received" in rc.message
+
+
+def test_rc_connected_shows_channel_and_rssi():
+    pf = _pf({"rc_connected": True, "rc_count": 8, "rc_rssi": 210})
+    items = {c.name: c for c in pf.run()}
+    rc = items["RC transmitter connected"]
+    assert rc.ok is True
+    assert "8 channels" in rc.message
+    assert "RSSI 210" in rc.message
+
+
+def test_ground_test_skips_rc_check():
+    """Bench rehearsal does not require a powered RC transmitter."""
+    pf = _pf({"rc_connected": False, "rc_count": 0}, ground_test=True)
+    items = {c.name: c for c in pf.run()}
+    assert items["RC transmitter connected"].ok is True
 
 
 def test_missing_verifier_fails_unless_ground_test():

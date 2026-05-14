@@ -47,7 +47,7 @@ def test_standoff_uses_velocity_direction_when_moving():
     tN, tE, status = _compute_standoff(
         pN=0, pE=0, drone_pN=-5, drone_pE=0,
         vN_p=0, vE_p=1.0,   # moving East
-        standoff_m=8.0, vel_threshold=0.3,
+        standoff_m=8.0, min_sep=4.0, vel_threshold=0.3,
     )
     assert status == "ok"
     # bearing = East (atan2(1,0) = π/2); standoff is West of person: tE ≈ -8
