@@ -20,6 +20,43 @@ from tracking.state_machine import State
 from tracking.tracker_state import TrackerState
 
 
+# Window for the E-STOP double-tap escalation in the SSH stdin loop.
+# First `estop` press sends BRAKE; a second press within this window
+# escalates to LAND. State is per-channel: the browser's E-STOP in
+# StreamServer keeps its own copy so SSH and UI can't desync each other.
+_ESTOP_DOUBLE_TAP_S: float = 3.0
+
+
+# Single source of truth for stdin command help text. Also serves the
+# `help` command — every verb the SSH operator can type must appear
+# here so docs and code can never drift.
+_HELP: list[tuple[str, str]] = [
+    ("help",                       "show this command list"),
+    ("status [json]",              "current telemetry snapshot (json = raw dict)"),
+    ("preflight",                  "run the preflight checklist"),
+    ("ids",                        "list detected person IDs"),
+    ("track <id>",                 "lock onto a numeric person ID"),
+    ("track on|off",               "enable/disable autonomous tracking"),
+    ("unlock",                     "release current person lock"),
+    ("mode",                       "print current tracker mode"),
+    ("mode auto|manual",           "set tracker mode"),
+    ("mode brake|land|rtl",        "request FCU safety mode (--drone required)"),
+    ("arm",                        "arm drone-body tracker after preflight (--drone)"),
+    ("disarm",                     "stop following (tracker only; FCU mode unchanged)"),
+    ("estop",                      "BRAKE; press again within 3s for LAND"),
+    ("pan <-100..100>",            "manual gimbal pan speed (MANUAL mode)"),
+    ("tilt <-100..100>",           "manual gimbal tilt speed (MANUAL mode)"),
+    ("stop",                       "stop manual gimbal motion"),
+    ("zoom in|out",                "0.5 s zoom pulse (also disables auto-zoom)"),
+    ("rec [on|off]",               "toggle/start/stop recording (no arg = toggle)"),
+    ("stream on|off",              "start/stop live MJPEG stream server"),
+    ("search on|off|restart",      "toggle search or restart initial acquisition scan"),
+    ("center",                     "center gimbal and reset zoom to 1x"),
+    ("autozoom on|off",            "toggle auto-zoom"),
+    ("q",                          "quit program"),
+]
+
+
 class OperatorInputController:
     """Handle all keyboard and terminal stdin commands.
 
@@ -58,6 +95,10 @@ class OperatorInputController:
         request_land:  Optional[Callable[[], dict]] = None,
         request_rtl:   Optional[Callable[[], dict]] = None,
         request_brake: Optional[Callable[[], dict]] = None,
+        handle_estop:     Optional[Callable[[str], dict]]       = None,
+        handle_arm:       Optional[Callable[[Optional[bool]], dict]] = None,
+        handle_preflight: Optional[Callable[[], list]]          = None,
+        handle_telemetry: Optional[Callable[[], dict]]          = None,
     ) -> None:
         self._state        = state
         self._ctrl         = ctrl
@@ -75,6 +116,18 @@ class OperatorInputController:
         self._init_scan    = init_scan
         self._expand       = expand_search
         self._lissajous    = lissajous
+
+        # SSH-parity callbacks (browser-equivalent actions for stdin use).
+        self._handle_estop     = handle_estop
+        self._handle_arm       = handle_arm
+        self._handle_preflight = handle_preflight
+        self._handle_telemetry = handle_telemetry
+
+        # E-STOP double-tap state. Independent of StreamServer's copy so
+        # the SSH channel can escalate BRAKE -> LAND without depending on
+        # whether the browser ever pressed the button.
+        self._estop_last_t:      float = 0.0
+        self._estop_last_action: str   = ""
 
     # ------------------------------------------------------------------
     #  Thread lifecycle
