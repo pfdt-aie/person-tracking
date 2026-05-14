@@ -169,10 +169,17 @@ class OperatorInputController:
                 # --- Info / discovery ---
                 if line == "help":
                     self._print_help()
-                elif line == "status":
-                    self._print_status()
-                elif line == "status json":
-                    self._print_status(json_mode=True)
+                elif line == "status" or line.startswith("status "):
+                    # Tolerate extra whitespace ('status  json') and
+                    # reject garbage args ('status foo') with a usage
+                    # hint rather than silently routing to unknown.
+                    parts = line.split()
+                    if len(parts) == 1:
+                        self._print_status()
+                    elif len(parts) == 2 and parts[1] == "json":
+                        self._print_status(json_mode=True)
+                    else:
+                        print("[Cmd] Usage: status [json]")
                 elif line == "preflight":
                     self._print_preflight()
 

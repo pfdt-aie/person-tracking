@@ -492,6 +492,28 @@ def test_stdin_estop_routes_with_double_tap(monkeypatch):
     assert actions == ["brake", "land"]
 
 
+def test_stdin_status_tolerates_extra_whitespace(monkeypatch, capsys):
+    """B1: 'status  json' (double space) must reach json mode, not unknown."""
+    cb = MagicMock(return_value={"x": 1})
+    c = _make_op(handle_telemetry=cb)
+    _drive_stdin(monkeypatch, c, ["status  json"])    # two spaces
+    out = capsys.readouterr().out
+    cb.assert_called_once_with()
+    assert '"x": 1' in out
+    assert "unknown" not in out
+
+
+def test_stdin_status_rejects_garbage_arg_with_usage(monkeypatch, capsys):
+    """B1: 'status foo' is a usage error, not silently routed to unknown."""
+    cb = MagicMock(return_value={"x": 1})
+    c = _make_op(handle_telemetry=cb)
+    _drive_stdin(monkeypatch, c, ["status foo"])
+    out = capsys.readouterr().out
+    assert "Usage: status [json]" in out
+    assert not cb.called
+    assert "unknown" not in out
+
+
 def test_stdin_handler_exception_does_not_kill_loop(monkeypatch, capsys):
     """One bad command must not silently kill the SSH input thread.
 
