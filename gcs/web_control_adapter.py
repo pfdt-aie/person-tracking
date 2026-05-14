@@ -28,6 +28,9 @@ class WebControlAdapter:
         grabber:        FrameGrabber — provides frame_w / frame_h for hit-testing.
         enter_manual:   Callable that switches the tracker to MANUAL mode.
         enter_auto:     Callable that switches the tracker to AUTO mode.
+        request_brake:  Optional callable for FCU BRAKE mode.
+        request_land:   Optional callable for FCU LAND mode.
+        request_rtl:    Optional callable for FCU RTL mode.
         manual_gimbal_speed: Gimbal speed for web D-pad (default: cfg.MANUAL_GIMBAL_SPEED).
     """
 
@@ -39,6 +42,9 @@ class WebControlAdapter:
         grabber,
         enter_manual: Callable[[], None],
         enter_auto:   Callable[[], None],
+        request_brake: Optional[Callable[[], dict]] = None,
+        request_land:  Optional[Callable[[], dict]] = None,
+        request_rtl:   Optional[Callable[[], dict]] = None,
         manual_gimbal_speed: int | None = None,
     ) -> None:
         self._state    = state
@@ -47,6 +53,9 @@ class WebControlAdapter:
         self._grabber  = grabber
         self._enter_manual = enter_manual
         self._enter_auto   = enter_auto
+        self._request_brake = request_brake
+        self._request_land  = request_land
+        self._request_rtl   = request_rtl
         self._spd = manual_gimbal_speed if manual_gimbal_speed is not None else cfg.MANUAL_GIMBAL_SPEED
 
     # ------------------------------------------------------------------
@@ -107,13 +116,29 @@ class WebControlAdapter:
         """Query or set tracking mode.
 
         Args:
-            mode_str: None = query only; 'manual' or 'auto' = set mode.
+            mode_str: None = query only; 'manual' or 'auto' = set tracker
+                mode; 'brake', 'land', or 'rtl' = request FCU safety mode.
         """
         state = self._state
         if mode_str == 'manual' and state.mode != 'MANUAL':
             self._enter_manual()
         elif mode_str == 'auto' and state.mode != 'AUTO':
             self._enter_auto()
+        elif mode_str in ('brake', 'land', 'rtl'):
+            cb = {
+                'brake': self._request_brake,
+                'land': self._request_land,
+                'rtl': self._request_rtl,
+            }[mode_str]
+            if cb is None:
+                return {
+                    'mode': state.mode,
+                    'status': 'error',
+                    'msg': f'{mode_str.upper()} not wired',
+                }
+            result = cb()
+            result.setdefault('mode', state.mode)
+            return result
         return {'mode': state.mode}
 
     def handle_gimbal(self, direction: str) -> dict:

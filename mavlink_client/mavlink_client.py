@@ -105,6 +105,7 @@ class MAVLinkClient:
         self._ekf_pos_var:  float = 0.0    # EKF_STATUS_REPORT pos_horiz_variance (S2.1)
         self._ekf_status_seen: bool = False  # only enforce var when message received
         self._armed:        bool  = False
+        self._landed_state: int | None = None
         self._mode:         str   = "UNKNOWN"
         self._hb_time:      float = 0.0    # monotonic timestamp of last heartbeat
         self._global_pos_t:  float = 0.0
@@ -298,6 +299,9 @@ class MAVLinkClient:
                         self._vel_n = msg.vx
                         self._vel_e = msg.vy
                         self._vel_d = msg.vz
+
+                    elif t == "EXTENDED_SYS_STATE":
+                        self._landed_state = getattr(msg, "landed_state", None)
 
                     elif t == "GLOBAL_POSITION_INT":
                         self._global_pos_t = time.monotonic()
@@ -594,6 +598,25 @@ class MAVLinkClient:
     def is_armed(self) -> bool:
         with self._lock:
             return self._armed
+
+    def is_landed(self) -> bool:
+        """Best-effort landed-state from EXTENDED_SYS_STATE.
+
+        If EXTENDED_SYS_STATE has not arrived yet, a disarmed FCU is treated
+        as landed and an armed FCU is treated as not landed.
+        """
+        with self._lock:
+            state = self._landed_state
+            armed = self._armed
+        if state is None:
+            return not armed
+        landed = getattr(mavutil.mavlink, "MAV_LANDED_STATE_ON_GROUND", 1)
+        return state == landed
+
+    def get_landed_state(self) -> int | None:
+        """Raw MAV_LANDED_STATE value, or None if not received yet."""
+        with self._lock:
+            return self._landed_state
 
     def get_last_heartbeat_time(self) -> float:
         with self._lock:
@@ -991,6 +1014,21 @@ class MAVLinkClient:
             print("[MAVLink] LAND mode confirmed (E-STOP stage 2)")
         else:
             print("[MAVLink] WARNING: LAND mode not confirmed by autopilot")
+        return ok
+
+    def send_disarm_if_landed(self) -> bool:
+        """Disarm the FCU only after landed-state says it is on the ground."""
+        if not self.is_landed():
+            print("[MAVLink] DISARM refused — FCU does not report landed")
+            return False
+        ok = self.send_command_with_ack(
+            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+            p1=0,   # disarm
+        )
+        if ok:
+            print("[MAVLink] DISARM confirmed")
+        else:
+            print("[MAVLink] WARNING: DISARM not confirmed by autopilot")
         return ok
 
     def send_zero_velocity(self) -> None:

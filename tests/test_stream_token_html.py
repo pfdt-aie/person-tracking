@@ -19,5 +19,11 @@ def test_stream_html_appends_token_to_control_fetches():
     assert 'const AUTH_TOKEN = "abc 123";' in html
     assert "fetch(ctlUrl('/click?x='" in html
     assert "fetch(ctlUrl('/mode?set=' + next))" in html
+    assert "fetch(ctlUrl('/mode?set=' + mode))" in html
     assert "fetch(ctlUrl('/gimbal?dir=' + dir))" in html
     assert "fetch(ctlUrl('/mode'))" in html
+    assert "Stop Follow" in html
+    assert "person_protection" in html
+    assert "SAFE TO FOLLOW" in html
+    assert "HOLDING" in html
+    assert "PILOT ACTION REQUIRED" in html

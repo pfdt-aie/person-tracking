@@ -108,6 +108,8 @@ class DroneController:
         # MIN_PERSON_DRONE_SEP_M + RETREAT_HYSTERESIS_M.  Prevents flutter
         # at the boundary if the subject is walking toward the drone.
         self._retreating: bool = False
+        self._last_person_sep_m: float | None = None
+        self._last_vertical_clearance_m: float | None = None
 
         # S2.6 — standoff bearing hysteresis.  _vel_above_t is the monotonic
         # timestamp the person's velocity first crossed STANDOFF_VEL_THRESHOLD_MS
@@ -327,6 +329,14 @@ class DroneController:
 
         # --- D1: Geofence check — return toward home instead of just stopping ---
         lat, lon, alt = self._mav.get_gps()
+        if alt < cfg.MIN_ALT_M:
+            self._mav.send_velocity_ned(0.0, 0.0, -cfg.RETREAT_SPEED_MS)  # vD<0 = climb
+            print(f"[Drone] Geofence altitude low ({alt:.1f}m) — climbing")
+            return 0.0
+        if alt > cfg.MAX_ALT_M:
+            self._mav.send_velocity_ned(0.0, 0.0, cfg.RETREAT_SPEED_MS)   # vD>0 = descend
+            print(f"[Drone] Geofence altitude high ({alt:.1f}m) — descending")
+            return 0.0
         if not self._safety.check_geofence(lat, lon, alt):
             if self._safety.is_home_set:
                 fence_lat, fence_lon = self._safety.get_fence_centre()
@@ -413,15 +423,19 @@ class DroneController:
 
         # S1.4 — Hard separation guard with active retreat + hysteresis.
         sep = math.hypot(pN - drone_pN, pE - drone_pE)
+        self._last_person_sep_m = sep
         if self._should_retreat(sep):
             self._send_retreat_velocity(pN, pE, drone_pN, drone_pE, sep)
             return 0.0
 
         # S1.4 — Vertical separation guard.  Uses drone AGL altitude as the
         # vertical clearance above the subject (assumes flat ground at home
-        # altitude; safe-conservative on hills since alt_agl > true clearance).
+        # altitude; use the higher of configured follow altitude and minimum
+        # clearance to preserve margin on uneven ground.
         alt_agl = self._mav.get_altitude_agl()
-        if alt_agl < cfg.MIN_VERTICAL_SEP_M:
+        self._last_vertical_clearance_m = alt_agl
+        min_vertical_clearance = max(cfg.MIN_VERTICAL_SEP_M, cfg.FOLLOW_ALTITUDE_M)
+        if alt_agl < min_vertical_clearance:
             self._mav.send_velocity_ned(0.0, 0.0, -cfg.RETREAT_SPEED_MS)  # vD<0 = climb
             return 0.0
 
@@ -535,6 +549,22 @@ class DroneController:
             away_e * cfg.RETREAT_SPEED_MS,
             0.0,
         )
+
+    def get_protection_status(self) -> dict:
+        """Return current person/drone protection status for telemetry."""
+        return {
+            "person_sep_m": (
+                round(self._last_person_sep_m, 2)
+                if self._last_person_sep_m is not None else None
+            ),
+            "vertical_clearance_m": (
+                round(self._last_vertical_clearance_m, 2)
+                if self._last_vertical_clearance_m is not None else None
+            ),
+            "retreating": bool(self._retreating),
+            "min_person_sep_m": cfg.MIN_PERSON_DRONE_SEP_M,
+            "min_vertical_sep_m": max(cfg.MIN_VERTICAL_SEP_M, cfg.FOLLOW_ALTITUDE_M),
+        }
 
     def _target_within_geofence(
         self, target_pN: float, target_pE: float, alt_agl: float
@@ -818,6 +848,8 @@ class DroneController:
         self._alert_issued  = False
         self._confirm_count = 0
         self._retreating    = False
+        self._last_person_sep_m = None
+        self._last_vertical_clearance_m = None
         self._vel_above_t   = -1.0
         self._bearing_init  = False
         self._session_start_t   = -1.0

@@ -341,6 +341,7 @@ Three independent layers of operator authority, all reachable at any moment:
 | **Take over flight** | RC mode switch → any non-GUIDED mode | FCU stops accepting our commands instantly. RC-override latch trips — auto-follow cannot resume until preflight + re-Arm |
 | **Take over camera** | Web UI **AUTO** button → **MANUAL** | On-screen D-pad appears; arrow keys / D-pad drive pan/tilt |
 | **Emergency stop** | Web UI red **E-STOP** button — or **Space** key | 1st press → BRAKE. 2nd press within 3 s → LAND. Always reachable, token-bypass |
+| **Direct safety mode** | Web UI **BRAKE**, **LAND**, **RTL** buttons or terminal `mode brake`, `mode land`, `mode rtl` | Stops body-following, sends zero velocity, then requests the FCU mode |
 
 </div>
 
@@ -397,10 +398,15 @@ python3 main.py [--drone] [--ground-test] [--cells N]
 ### 10.3 Terminal (headless / SSH)
 
 ```
-track <id>   Lock to persistent person ID
-unlock       Release lock
-ids          Print currently detected IDs
-q            Quit
+track <id>    Lock to persistent person ID
+unlock        Release lock
+ids           Print currently detected IDs
+mode auto     Automatic tracking mode
+mode manual   Manual gimbal mode; stops body-following
+mode brake    Stop body-following and send BRAKE
+mode land     Stop body-following and send LAND
+mode rtl      Stop body-following and send RTL / return-to-home
+q             Quit
 ```
 
 ---
@@ -413,14 +419,15 @@ q            Quit
 |:---|:---:|:---|
 | `/` | — | Operator HTML page |
 | `/stream` | — | MJPEG over HTTP (`multipart/x-mixed-replace`) |
-| `/status` | — | Live telemetry JSON · mode, GPS, batt, fence, RC-override, FPS, tracking-loss dt |
+| `/status` | — | Live telemetry JSON · readiness inputs, mode, GPS, batt, fence, RC-override, FPS, tracking-loss dt, person-protection status |
 | `/preflight` | — | Preflight checklist JSON · `{items, all_ok, armed}` |
 | `/click?x=&y=` | token | Lock to normalised (x, y) |
 | `/unlock` | token | Release lock |
 | `/mode?set=auto\|manual` | token | Set tracker mode |
+| `/mode?set=brake\|land\|rtl` | token | Stop body-following and request FCU safety mode |
 | `/gimbal?dir=up\|down\|left\|right\|stop` | token | Manual gimbal nudge (MANUAL only) |
 | `/zoom_in` / `/zoom_out` | token | Gimbal zoom |
-| `/arm_tracker?on=true\|false` | token | Arm or disarm drone-body following |
+| `/arm_tracker?on=true\|false` | token | Arm or stop drone-body following |
 | `/estop` | **always** | 1st press → BRAKE · 2nd press within 3 s → LAND |
 
 </div>
@@ -470,6 +477,7 @@ Every rule is enforced before any MAVLink command leaves the Jetson.
 | **Retreat + hysteresis** | 1 m/s active retreat when sep < 4 m · resume above 5.5 m |
 | **RC override** | GUIDED → other mode latches · cleared only by re-arm after preflight |
 | **Software E-STOP** | Web button + Space key · BRAKE → LAND escalation |
+| **Readiness banner** | Web UI shows `SAFE TO FOLLOW`, `HOLDING`, or `PILOT ACTION REQUIRED` from live telemetry |
 
 </div>
 

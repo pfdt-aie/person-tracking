@@ -241,6 +241,11 @@ body{{display:flex;flex-direction:column;font-family:monospace;color:#ddd}}
       gap:10px;border-bottom:1px solid #222;flex-shrink:0}}
 #hdr h1{{font-size:12px;color:#0cf;letter-spacing:1px;white-space:nowrap}}
 #stat{{font-size:11px;color:#0f0;min-width:220px}}
+#ready{{font-size:11px;font-weight:bold;padding:2px 8px;border-radius:4px;
+        border:1px solid #666;white-space:nowrap;background:#333;color:#ddd}}
+#ready.safe{{background:#063;color:#bfffd8;border-color:#21c46b}}
+#ready.hold{{background:#332600;color:#ffd96a;border-color:#aa8200}}
+#ready.action{{background:#550000;color:#ffc0c0;border-color:#ff5555}}
 #badge{{font-size:11px;background:#004400;color:#7fff7f;border:1px solid #0a0;
         padding:1px 8px;border-radius:8px;display:none;white-space:nowrap}}
 .zbtn{{background:#003366;color:#aaddff;border:1px solid #06f;
@@ -278,6 +283,12 @@ body{{display:flex;flex-direction:column;font-family:monospace;color:#ddd}}
         box-shadow:0 0 8px rgba(255,0,0,.6);animation:estoppulse 1.6s infinite}}
 #estop:hover{{background:#ff0000}}
 #estop.armed{{background:#ff3300;animation:none}}
+.safeact{{background:#2a1a00;color:#ffd080;border:1px solid #aa6600;
+          padding:3px 8px;border-radius:4px;cursor:pointer;font-size:11px;
+          font-weight:bold}}
+.safeact:hover{{background:#4a2c00}}
+.safeact.land{{background:#3a1600;border-color:#bb4a1a;color:#ffc0a0}}
+.safeact.rtl{{background:#102030;border-color:#4080aa;color:#aaddff}}
 @keyframes estoppulse{{
   0%,100%{{box-shadow:0 0 6px rgba(255,0,0,.4)}}
   50%   {{box-shadow:0 0 14px rgba(255,80,80,.95)}}
@@ -316,6 +327,7 @@ canvas{{max-width:100%;max-height:100%;display:block;cursor:crosshair}}
 <div id="hdr">
   <h1>&#9654; DRONE TRACKER</h1>
   <span id="stat">connecting…</span>
+  <span id="ready" class="hold">HOLDING</span>
   <span id="telem" style="font-size:11px;color:#7fff7f;margin-left:6px"></span>
   <span id="badge">LOCK ID ?</span>
   <button id="mbtn" data-mode="AUTO" onclick="toggleMode()" title="Toggle Manual/Auto">AUTO</button>
@@ -325,11 +337,14 @@ canvas{{max-width:100%;max-height:100%;display:block;cursor:crosshair}}
   <button id="ubtn" onclick="doUnlock()">UNLOCK</button>
   <button id="armbtn" onclick="togglePreflight()" title="Preflight checklist + arm tracker">ARM ▾</button>
   <button id="estop" onclick="doEstop()" title="Emergency stop — first press BRAKE, second LAND, or Space">E-STOP</button>
+  <button class="safeact" onclick="doSafetyMode('brake')" title="BRAKE mode">BRAKE</button>
+  <button class="safeact land" onclick="doSafetyMode('land')" title="LAND mode">LAND</button>
+  <button class="safeact rtl" onclick="doSafetyMode('rtl')" title="RTL mode">RTL</button>
 </div>
 <div id="pfpanel" style="display:none">
   <div id="pflist"></div>
   <button id="armgo" onclick="doArm()">Arm Tracker</button>
-  <button id="disarmgo" onclick="doDisarm()">Disarm</button>
+  <button id="disarmgo" onclick="doDisarm()">Stop Follow</button>
 </div>
 <div id="wrap">
   <canvas id="c" width="{_STREAM_W_HI}" height="{_STREAM_H_HI}"></canvas>
@@ -438,6 +453,41 @@ function toggleQuality() {{
 
 // S3.1 — telemetry strip update. /status now carries failsafe state.
 function fmt(v, suffix) {{ return (v == null) ? '—' : (v + (suffix || '')); }}
+function syncReadiness(d) {{
+  const el = document.getElementById('ready');
+  if (!el || !d) return;
+  let label = 'HOLDING';
+  let cls = 'hold';
+  const p = d.person_protection || {{}};
+  const bad = (
+    d.mavlink === false ||
+    d.rc_connected === false ||
+    d.rc_override ||
+    d.fence_breach ||
+    d.sensors_ok === false ||
+    d.home_set === false ||
+    (d.gps_fix != null && d.gps_fix < 3) ||
+    (d.tracking_loss_s != null && d.tracking_loss_s >= 5.0)
+  );
+  const following = (
+    d.drone_armed &&
+    d.mode_tracker === 'AUTO' &&
+    d.mode_fcu === 'GUIDED' &&
+    d.armed_fcu &&
+    d.rc_connected &&
+    d.body_confirmed &&
+    !p.retreating
+  );
+  if (bad) {{
+    label = 'PILOT ACTION REQUIRED';
+    cls = 'action';
+  }} else if (following) {{
+    label = 'SAFE TO FOLLOW';
+    cls = 'safe';
+  }}
+  el.textContent = label;
+  el.className = cls;
+}}
 function syncTelemetry(d) {{
   const el = document.getElementById('telem');
   if (!el || !d) return;
@@ -452,6 +502,13 @@ function syncTelemetry(d) {{
              ' HDOP ' + fmt(d.gps_hdop));
   parts.push(fmt(d.battery_v, 'V'));
   if (d.fps != null) parts.push(d.fps + 'fps');
+  if (d.person_protection) {{
+    const p = d.person_protection;
+    if (p.person_sep_m != null) parts.push('sep ' + p.person_sep_m + 'm');
+    if (p.vertical_clearance_m != null) parts.push('clr ' + p.vertical_clearance_m + 'm');
+    if (p.retreating) parts.push('RETREAT');
+  }}
+  if (d.landed_fcu) parts.push('LANDED');
   if (d.tracking_loss_s != null && d.tracking_loss_s > 1.0)
     parts.push('lost ' + d.tracking_loss_s + 's');
   if (d.ground_test) parts.push('DRY-RUN');
@@ -462,6 +519,7 @@ function syncTelemetry(d) {{
 setInterval(() => {{
   fetch('/status').then(r => r.json()).then(d => {{
     syncBadge(d);
+    syncReadiness(d);
     syncTelemetry(d);
   }}).catch(() => {{}});
 }}, 1000);
@@ -534,9 +592,18 @@ function doArm() {{
 }}
 function doDisarm() {{
   fetch(ctlUrl('/arm_tracker?on=false')).then(r => r.json()).then(d => {{
-    showToast('Tracker DISARMED', false);
+    showToast('Follow STOPPED', false);
     refreshPreflight();
-  }}).catch(() => showToast('Disarm request failed', true));
+  }}).catch(() => showToast('Stop request failed', true));
+}}
+
+function doSafetyMode(mode) {{
+  fetch(ctlUrl('/mode?set=' + mode)).then(r => r.json()).then(d => {{
+    const label = (d.action || mode).toUpperCase();
+    const ok = d.status !== 'error';
+    showToast(label + (ok ? ' requested' : ' failed: ' + (d.msg || 'check fcu')), !ok);
+    refreshPreflight();
+  }}).catch(() => showToast(mode.toUpperCase() + ' request failed', true));
 }}
 
 // S1.1 — Software E-STOP. First press → BRAKE; second press within 3 s → LAND.

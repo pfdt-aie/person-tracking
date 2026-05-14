@@ -103,3 +103,21 @@ def test_web_mode_switch_calls_enter_manual():
     )
     adapter.handle_mode('manual')
     assert 'manual' in called
+
+
+def test_web_mode_brake_calls_safety_callback():
+    called = []
+    adapter = WebControlAdapter(
+        state=TrackerState(),
+        ctrl=_NullCtrl(),
+        zoom_ctrl=_NullZoom(),
+        grabber=_Grabber(),
+        enter_manual=lambda: None,
+        enter_auto=lambda: None,
+        request_brake=lambda: called.append('brake') or {'status': 'ok', 'action': 'brake'},
+    )
+    result = adapter.handle_mode('brake')
+    assert called == ['brake']
+    assert result['status'] == 'ok'
+    assert result['action'] == 'brake'
+    assert result['mode'] == 'AUTO'

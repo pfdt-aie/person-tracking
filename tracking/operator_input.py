@@ -32,6 +32,9 @@ class OperatorInputController:
         grabber:       FrameGrabber — provides frame dimensions for recorder start.
         enter_manual:  Callable that switches the tracker to MANUAL mode.
         enter_auto:    Callable that switches the tracker to AUTO mode.
+        request_land:   Optional callable that asks the FCU to enter LAND mode.
+        request_rtl:    Optional callable that asks the FCU to enter RTL mode.
+        request_brake:  Optional callable that asks the FCU to enter BRAKE mode.
         reset_all:     Callable that resets all state (from GimbalStateMachine).
         search, init_scan, expand_search, lissajous:
                        Search pattern instances for key 's' / 'i' commands.
@@ -52,6 +55,9 @@ class OperatorInputController:
         init_scan,
         expand_search,
         lissajous,
+        request_land:  Optional[Callable[[], dict]] = None,
+        request_rtl:   Optional[Callable[[], dict]] = None,
+        request_brake: Optional[Callable[[], dict]] = None,
     ) -> None:
         self._state        = state
         self._ctrl         = ctrl
@@ -61,6 +67,9 @@ class OperatorInputController:
         self._grabber      = grabber
         self._enter_manual = enter_manual
         self._enter_auto   = enter_auto
+        self._request_land = request_land
+        self._request_rtl  = request_rtl
+        self._request_brake = request_brake
         self._reset_all    = reset_all
         self._search       = search
         self._init_scan    = init_scan
@@ -84,7 +93,8 @@ class OperatorInputController:
     def _stdin_loop(self) -> None:
         st = self._state
         print("[Cmd] Terminal commands: 'track <id>' | 'unlock' | 'ids' | "
-              "'mode auto' | 'mode manual' | 'pan <spd>' | 'tilt <spd>' | 'stop' | 'q'")
+              "'mode auto' | 'mode manual' | 'mode brake' | 'mode land' | 'mode rtl' | "
+              "'pan <spd>' | 'tilt <spd>' | 'stop' | 'q'")
         while st.running:
             try:
                 line = sys.stdin.readline()
@@ -114,13 +124,19 @@ class OperatorInputController:
                         print("[IDs] No persons currently detected")
                 elif line.startswith("mode "):
                     parts = line.split()
-                    if len(parts) == 2 and parts[1] in ("auto", "manual"):
+                    if len(parts) == 2 and parts[1] in ("auto", "manual", "brake", "land", "rtl"):
                         if parts[1] == "manual":
                             self._enter_manual()
-                        else:
+                        elif parts[1] == "auto":
                             self._enter_auto()
+                        elif parts[1] == "brake":
+                            self._handle_safety_mode("BRAKE", self._request_brake)
+                        elif parts[1] == "land":
+                            self._handle_safety_mode("LAND", self._request_land)
+                        else:
+                            self._handle_safety_mode("RTL", self._request_rtl)
                     else:
-                        print("[Cmd] Usage: mode auto | mode manual")
+                        print("[Cmd] Usage: mode auto | mode manual | mode brake | mode land | mode rtl")
                 elif line.startswith("pan "):
                     if st.mode != "MANUAL":
                         print("[Cmd] Switch to MANUAL mode first ('mode manual')")
@@ -154,6 +170,18 @@ class OperatorInputController:
                     break
             except Exception:
                 break
+
+    def _handle_safety_mode(self, label: str, cb: Optional[Callable[[], dict]]) -> None:
+        if cb is None:
+            print(f"[Cmd] {label} unavailable — tracker launched without MAVLink handler")
+            return
+        result = cb()
+        status = result.get("status", "error")
+        msg = result.get("msg", "")
+        if status == "ok":
+            print(f"[Cmd] {label} requested")
+        else:
+            print(f"[Cmd] {label} failed: {msg}")
 
     # ------------------------------------------------------------------
     #  Arrow-key handler (raw cv2.waitKey value)

@@ -159,6 +159,9 @@ class PersonGimbalTracker:
             grabber      = self.grabber,
             enter_manual = self._enter_manual,
             enter_auto   = self._enter_auto,
+            request_brake = self._request_brake,
+            request_land  = self._request_land,
+            request_rtl   = self._request_rtl,
             manual_gimbal_speed = self._s.manual_gimbal_speed,
         )
 
@@ -198,6 +201,9 @@ class PersonGimbalTracker:
             grabber      = self.grabber,
             enter_manual = self._enter_manual,
             enter_auto   = self._enter_auto,
+            request_land = self._request_land,
+            request_rtl  = self._request_rtl,
+            request_brake = self._request_brake,
             reset_all    = self._gsm.reset_all,
             search       = self.search,
             init_scan    = self.init_scan,
@@ -286,6 +292,9 @@ class PersonGimbalTracker:
 
     def _enter_manual(self) -> None:
         """Switch to MANUAL gimbal-control mode. Safe to call mid-flight."""
+        self._stop_drone_body_autonomy("MANUAL")
+        if self._drone_enabled and self.mav.is_connected():
+            self.mav.send_zero_velocity()
         self._gsm.reset_all()
         self._ts.manual_yaw_speed   = 0
         self._ts.manual_pitch_speed = 0
@@ -335,6 +344,7 @@ class PersonGimbalTracker:
                                drone_enabled=self._drone_enabled)
         try:
             self._ts.tracking_enabled = False
+            self._ts.drone_armed = False
             self.drone_ctrl.reset()
         except Exception as exc:
             print(f"[ESTOP] tracker reset error: {exc}")
@@ -354,6 +364,49 @@ class PersonGimbalTracker:
             "action": action,
             "msg": "" if ok else f"FCU did not ACK {action.upper()}",
         }
+
+    def _stop_drone_body_autonomy(self, reason: str) -> None:
+        """Disable body-following until the operator explicitly arms again."""
+        if self._ts.drone_armed:
+            print(f"[Arm] Drone-body tracker DISARMED by {reason}")
+        self._ts.drone_armed = False
+        try:
+            self.drone_ctrl.reset()
+        except Exception as exc:
+            print(f"[{reason}] tracker reset error: {exc}")
+
+    def _request_safety_mode(self, action: str, send_fn) -> dict:
+        """Shared terminal safety-mode handler for BRAKE/LAND/RTL."""
+        self._stop_drone_body_autonomy(action)
+        if not self._drone_enabled:
+            msg = "tracker launched without --drone"
+            print(f"[{action}] {msg}")
+            return {"status": "error", "action": action.lower(), "msg": msg}
+
+        if not self.mav.is_connected():
+            msg = f"MAVLink not connected — {action} not sent"
+            print(f"[{action}] {msg}")
+            return {"status": "error", "action": action.lower(), "msg": msg}
+
+        self.mav.send_zero_velocity()
+        ok = send_fn()
+        return {
+            "status": "ok" if ok else "error",
+            "action": action.lower(),
+            "msg": "" if ok else f"FCU did not ACK {action}",
+        }
+
+    def _request_brake(self) -> dict:
+        """Operator BRAKE request used by the terminal ``mode brake`` command."""
+        return self._request_safety_mode("BRAKE", self.mav.send_brake)
+
+    def _request_land(self) -> dict:
+        """Operator LAND request used by the terminal ``mode land`` command."""
+        return self._request_safety_mode("LAND", self.mav.send_land)
+
+    def _request_rtl(self) -> dict:
+        """Operator RTL request used by the terminal ``mode rtl`` command."""
+        return self._request_safety_mode("RTL", self.mav.send_rtl)
 
     # ------------------------------------------------------------------
     #  Preflight + arm  (S1.3)
@@ -440,6 +493,8 @@ class PersonGimbalTracker:
                 out["home_set"]    = bool(self.mav.is_home_set())
                 out["sensors_ok"]  = bool(self.mav.is_sensors_healthy())
                 out["ground_test"] = bool(self.mav.is_ground_test())
+                out["landed_fcu"]  = bool(self.mav.is_landed())
+                out["landed_state"] = self.mav.get_landed_state()
         except Exception as exc:
             out["mavlink_error"] = str(exc)
 
@@ -449,6 +504,7 @@ class PersonGimbalTracker:
             out["tracking_loss_s"] = round(now - last_det, 2) if last_det else None
             out["fps"]             = round(self.drone_ctrl.effective_fps(), 1)
             out["body_confirmed"]  = bool(self.drone_ctrl.is_body_confirmed())
+            out["person_protection"] = self.drone_ctrl.get_protection_status()
         except Exception:
             pass
         return out
