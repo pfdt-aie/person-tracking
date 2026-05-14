@@ -237,6 +237,115 @@ class OperatorInputController:
             print(f"[Cmd] {label} failed: {msg}")
 
     # ------------------------------------------------------------------
+    #  Stdin-only printers (SSH parity surface)
+    #
+    #  Render structured output for the operator's terminal. They never
+    #  mutate tracker state — callers above (the stdin loop) decide
+    #  when to invoke them. All three rely on optional callbacks the
+    #  tracker may not have wired (gimbal-only mode), so each refuses
+    #  gracefully when its callback is None.
+    # ------------------------------------------------------------------
+
+    def _print_help(self) -> None:
+        """Render the _HELP table to stdout, column-aligned."""
+        width = max(len(usage) for usage, _ in _HELP)
+        print("[Cmd] Available commands:")
+        for usage, doc in _HELP:
+            print(f"  {usage.ljust(width)}  {doc}")
+
+    def _print_status(self, json_mode: bool = False) -> None:
+        """Print the live telemetry snapshot.
+
+        json_mode=True dumps the raw dict on a single line so the
+        operator can pipe `status json` through jq or save a log line.
+        """
+        cb = self._handle_telemetry
+        if cb is None:
+            print("[Cmd] status unavailable — telemetry callback not wired")
+            return
+        try:
+            data = cb() or {}
+        except Exception as exc:
+            print(f"[Cmd] status error: {exc}")
+            return
+        if json_mode:
+            import json as _json
+            print(f"[Cmd] {_json.dumps(data, default=str)}")
+            return
+
+        def fmt(v, suffix: str = "") -> str:
+            return "—" if v is None else f"{v}{suffix}"
+
+        def yn(v) -> str:
+            return "yes" if v else "no"
+
+        pp        = data.get("person_protection") or {}
+        rc_rssi   = data.get("rc_rssi", 0)
+        rssi_str  = f"·{rc_rssi}" if rc_rssi else ""
+        dry_run   = " DRY-RUN" if data.get("ground_test") else ""
+
+        print("[Cmd] status:")
+        print(f"  tracker={data.get('mode_tracker', '—')}  "
+              f"drone={'on' if data.get('drone_enabled') else 'off'}  "
+              f"armed=tracker:{yn(data.get('drone_armed'))} "
+              f"fcu:{yn(data.get('armed_fcu'))}")
+        print(f"  mavlink={'up' if data.get('mavlink') else 'down'}  "
+              f"mode_fcu={fmt(data.get('mode_fcu'))}  "
+              f"rc={'on' if data.get('rc_connected') else 'off'}{rssi_str}")
+        print(f"  gps=fix{fmt(data.get('gps_fix'))} "
+              f"sats{fmt(data.get('gps_sats'))} "
+              f"hdop{fmt(data.get('gps_hdop'))}  "
+              f"ekf_var={fmt(data.get('ekf_var'))}")
+        print(f"  battery={fmt(data.get('battery_v'), 'V')}  "
+              f"fence={'breach' if data.get('fence_breach') else 'ok'}  "
+              f"home={'set' if data.get('home_set') else 'unset'}  "
+              f"landed={yn(data.get('landed_fcu'))}")
+        print(f"  tracking_loss={fmt(data.get('tracking_loss_s'), 's')}  "
+              f"fps={fmt(data.get('fps'))}  "
+              f"body_confirmed={yn(data.get('body_confirmed'))}")
+        print(f"  person_sep={fmt(pp.get('person_sep_m'), 'm')}  "
+              f"vert_clr={fmt(pp.get('vertical_clearance_m'), 'm')}  "
+              f"retreating={yn(pp.get('retreating'))}"
+              f"{dry_run}")
+
+    def _print_preflight(self) -> None:
+        """Print each preflight check on its own line plus a summary."""
+        cb = self._handle_preflight
+        if cb is None:
+            print("[Cmd] preflight unavailable — preflight callback not wired")
+            return
+        try:
+            items = cb() or []
+        except Exception as exc:
+            print(f"[Cmd] preflight error: {exc}")
+            return
+        if not items:
+            print("[Cmd] preflight: (no checks reported)")
+            return
+        print("[Cmd] preflight:")
+        passed = 0
+        for it in items:
+            ok   = bool(it.get("ok"))
+            tag  = "[OK]  " if ok else "[FAIL]"
+            name = it.get("name", "?")
+            msg  = it.get("message", "")
+            passed += int(ok)
+            line = f"  {tag} {name}"
+            if msg:
+                line += f"  — {msg}"
+            print(line)
+        print(f"  passed={passed}/{len(items)}")
+
+    def _print_unknown(self, line: str) -> None:
+        """Print an 'unknown command' hint and log it to the flight log."""
+        print(f"[Cmd] unknown: {line!r} — type 'help' for the list")
+        try:
+            from utils.flight_log import get_flight_log
+            get_flight_log().event("ssh_unknown_command", line=line)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
     #  Shared action helpers
     #
     #  Each method below replaces a single-key body in handle_key() and
