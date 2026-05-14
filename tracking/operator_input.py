@@ -237,6 +237,118 @@ class OperatorInputController:
             print(f"[Cmd] {label} failed: {msg}")
 
     # ------------------------------------------------------------------
+    #  Shared action helpers
+    #
+    #  Each method below replaces a single-key body in handle_key() and
+    #  is also called from the stdin loop (Phase 4). Keep them
+    #  side-effect-equivalent to the previous inline bodies so keyboard
+    #  behavior is unchanged; new behavior (e.g. _zoom_pulse disabling
+    #  auto-zoom) is called out in the docstring.
+    # ------------------------------------------------------------------
+
+    def _toggle_tracking(self, state: Optional[bool] = None) -> None:
+        """Toggle (state=None) or set autonomous person tracking on/off."""
+        st = self._state
+        target = (not st.tracking_enabled) if state is None else bool(state)
+        if target == st.tracking_enabled:
+            print(f"[Track] {'ON' if target else 'OFF'} (unchanged)")
+            return
+        st.tracking_enabled = target
+        if not target:
+            self._reset_all()
+        print(f"[Track] {'ON' if target else 'OFF'}")
+
+    def _toggle_search(self, state: Optional[bool] = None) -> None:
+        """Toggle (state=None) or set the search subsystem on/off.
+
+        When turning off, every running search pattern is stopped and
+        the FSM is parked in WAITING if it was in a search state.
+        """
+        st = self._state
+        target = (not st.search_enabled) if state is None else bool(state)
+        st.search_enabled = target
+        if not target:
+            self._search.stop(); self._init_scan.stop()
+            self._expand.stop(); self._lissajous.stop()
+            if st.state in State.SEARCH_STATES:
+                st.state = State.WAITING
+                self._ctrl.stop()
+        print(f"[Search] {'ON' if target else 'OFF'}")
+
+    def _restart_initial_scan(self) -> None:
+        """Cancel any in-flight search and start the initial acquisition scan."""
+        self._search.stop(); self._expand.stop(); self._lissajous.stop()
+        self._state.state = State.INITIAL_SCAN
+        self._init_scan.start()
+        print("[Search] Restarting initial acquisition scan")
+
+    def _toggle_recording(self, state: Optional[bool] = None) -> None:
+        """Toggle (state=None) or set the video recorder on/off."""
+        rec = self._recorder
+        target = (not rec.is_recording) if state is None else bool(state)
+        if target == rec.is_recording:
+            print(f"[Rec] {'ON' if target else 'OFF'} (unchanged)")
+            return
+        if target:
+            rec.start(self._grabber.frame_w, self._grabber.frame_h, cfg.RECORD_FPS)
+        else:
+            rec.stop()
+        print(f"[Rec] {'ON' if rec.is_recording else 'OFF'}")
+
+    def _toggle_stream(self, state: Optional[bool] = None) -> None:
+        """Toggle (state=None) or set the live MJPEG stream on/off.
+
+        Refuses gracefully when the stream was disabled at launch
+        (`STREAM_ENABLED=False` → `self._stream is None`).
+        """
+        if self._stream is None:
+            print("[Stream] disabled at launch (STREAM_ENABLED=False)")
+            return
+        active = self._stream.is_active
+        target = (not active) if state is None else bool(state)
+        if target == active:
+            print(f"[Stream] {'ON' if target else 'OFF'} (unchanged)")
+            return
+        if target:
+            self._stream.start()   # StreamServer.start() prints its own banner
+        else:
+            self._stream.stop()
+            print("[Stream] Stopped")
+
+    def _toggle_autozoom(self, state: Optional[bool] = None) -> None:
+        """Toggle (state=None) or set the auto-zoom controller on/off."""
+        target = (not self._zoom.enabled) if state is None else bool(state)
+        self._zoom.enabled = target
+        if not target:
+            self._zoom.stop()
+        print(f"[AutoZoom] {'ON' if target else 'OFF'}")
+
+    def _zoom_pulse(self, direction: str) -> None:
+        """Send a 0.5 s manual zoom pulse and disable auto-zoom.
+
+        Matches the web UI behaviour (web_control_adapter.handle_zoom)
+        so SSH and browser zoom commands have identical side effects.
+        Direction must be 'in' or 'out'; anything else is ignored.
+        """
+        if direction not in ("in", "out"):
+            print(f"[Zoom] unknown direction: {direction!r} (expected in|out)")
+            return
+        if direction == "in":
+            self._ctrl.zoom_in()
+        else:
+            self._ctrl.zoom_out()
+        self._zoom.enabled = False
+        self._state.manual_zoom_stop_at = time.time() + 0.5
+        print(f"[Zoom] {direction.upper()}")
+
+    def _center_and_reset(self) -> None:
+        """Center the gimbal, reset tracker FSM state, snap zoom to 1x."""
+        self._ctrl.center()
+        self._reset_all()
+        self._ctrl.zoom_absolute(1.0)
+        print("[Reset] Center + Zoom 1x")
+
+    # ------------------------------------------------------------------
     #  Arrow-key handler (raw cv2.waitKey value)
     # ------------------------------------------------------------------
 
@@ -277,50 +389,24 @@ class OperatorInputController:
             else:
                 self._enter_auto()
         elif key == ord("t"):
-            st.tracking_enabled = not st.tracking_enabled
-            if not st.tracking_enabled:
-                self._reset_all()
-            print(f"[Track] {'ON' if st.tracking_enabled else 'OFF'}")
+            self._toggle_tracking()
         elif key == ord("r"):
-            self._ctrl.center()
-            self._reset_all()
-            self._ctrl.zoom_absolute(1.0)
-            print("[Reset] Center + Zoom 1×")
+            self._center_and_reset()
         elif key == ord("s"):
-            st.search_enabled = not st.search_enabled
-            if not st.search_enabled:
-                self._search.stop(); self._init_scan.stop()
-                self._expand.stop(); self._lissajous.stop()
-                if st.state in State.SEARCH_STATES:
-                    st.state = State.WAITING
-                    self._ctrl.stop()
-            print(f"[Search] {'ON' if st.search_enabled else 'OFF'}")
+            self._toggle_search()
         elif key == ord("i"):
-            self._search.stop(); self._expand.stop(); self._lissajous.stop()
-            st.state = State.INITIAL_SCAN
-            self._init_scan.start()
-            print("[Search] Restarting initial acquisition scan")
+            self._restart_initial_scan()
         elif key == ord("d"):
             # show_display is still on PersonGimbalTracker — handled there
             pass
         elif key == ord("z"):
-            self._ctrl.zoom_in()
-            st.manual_zoom_stop_at = time.time() + 0.5
+            self._zoom_pulse("in")
         elif key == ord("x"):
-            self._ctrl.zoom_out()
-            st.manual_zoom_stop_at = time.time() + 0.5
+            self._zoom_pulse("out")
         elif key == ord("a"):
-            self._zoom.enabled = not self._zoom.enabled
-            if not self._zoom.enabled:
-                self._zoom.stop()
-            print(f"[AutoZoom] {'ON' if self._zoom.enabled else 'OFF'}")
+            self._toggle_autozoom()
         elif key == ord("l"):
-            if self._stream:
-                if self._stream.is_active:
-                    self._stream.stop()
-                    print("[Stream] Stopped")
-                else:
-                    self._stream.start()
+            self._toggle_stream()
         elif key in (ord("+"), ord("=")):
             cfg.ADAPT_KP_MIN += 2; cfg.ADAPT_KP_MAX += 2
             print(f"[Adapt] Kp range: {cfg.ADAPT_KP_MIN:.0f}-{cfg.ADAPT_KP_MAX:.0f}")
@@ -334,10 +420,4 @@ class OperatorInputController:
         elif key == ord("["):
             cfg.ADAPT_SPEED_MAX = max(cfg.ADAPT_SPEED_MIN + 5, cfg.ADAPT_SPEED_MAX - 5)
         elif key == ord("v"):
-            if self._recorder.is_recording:
-                self._recorder.stop()
-            else:
-                self._recorder.start(
-                    self._grabber.frame_w, self._grabber.frame_h, cfg.RECORD_FPS
-                )
-            print(f"[Rec] {'ON' if self._recorder.is_recording else 'OFF'}")
+            self._toggle_recording()
