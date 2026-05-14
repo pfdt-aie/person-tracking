@@ -145,9 +145,9 @@ class OperatorInputController:
 
     def _stdin_loop(self) -> None:
         st = self._state
-        print("[Cmd] Terminal commands: 'track <id>' | 'unlock' | 'ids' | "
-              "'mode auto' | 'mode manual' | 'mode brake' | 'mode land' | 'mode rtl' | "
-              "'pan <spd>' | 'tilt <spd>' | 'stop' | 'q'")
+        print("[Cmd] Stdin command loop ready — type 'help' for the full list. "
+              "Quick: track <id> | unlock | ids | status | preflight | "
+              "mode auto|manual | arm | disarm | estop | q")
         while st.running:
             try:
                 line = sys.stdin.readline()
@@ -156,25 +156,20 @@ class OperatorInputController:
                 line = line.strip().lower()
                 if not line:
                     continue
-                if line.startswith("track "):
-                    parts = line.split()
-                    if len(parts) == 2 and parts[1].isdigit():
-                        st.lock_id = int(parts[1])
-                        print(f"[Target] Locked onto ID {st.lock_id}. Type 'unlock' to release.")
-                    else:
-                        print("[Cmd] Usage: track <number>  (e.g. track 2)")
-                elif line == "unlock":
-                    st.lock_id = None
-                    print("[Target] Lock released — tracking largest person")
-                elif line == "ids":
-                    snap = dict(st.detected_ids)
-                    if snap:
-                        for tid, d in snap.items():
-                            marker = " ← LOCKED" if tid == st.lock_id else ""
-                            print(f"  ID {tid:3d}  center=({d.cx:.0f},{d.cy:.0f})"
-                                  f"  conf={d.conf:.2f}{marker}")
-                    else:
-                        print("[IDs] No persons currently detected")
+
+                # --- Info / discovery ---
+                if line == "help":
+                    self._print_help()
+                elif line == "status":
+                    self._print_status()
+                elif line == "status json":
+                    self._print_status(json_mode=True)
+                elif line == "preflight":
+                    self._print_preflight()
+
+                # --- Tracker / FCU mode ---
+                elif line == "mode":
+                    print(f"[Cmd] mode={st.mode}")
                 elif line.startswith("mode "):
                     parts = line.split()
                     if len(parts) == 2 and parts[1] in ("auto", "manual", "brake", "land", "rtl"):
@@ -189,7 +184,74 @@ class OperatorInputController:
                         else:
                             self._handle_safety_mode("RTL", self._request_rtl)
                     else:
-                        print("[Cmd] Usage: mode auto | mode manual | mode brake | mode land | mode rtl")
+                        print("[Cmd] Usage: mode | mode auto|manual|brake|land|rtl")
+
+                # --- Drone-body arm + software E-STOP ---
+                elif line == "arm":
+                    self._handle_stdin_arm(True)
+                elif line == "disarm":
+                    self._handle_stdin_arm(False)
+                elif line == "estop":
+                    self._handle_stdin_estop()
+
+                # --- Target / lock ---
+                elif line.startswith("track "):
+                    parts = line.split()
+                    if len(parts) == 2 and parts[1].isdigit():
+                        st.lock_id = int(parts[1])
+                        print(f"[Target] Locked onto ID {st.lock_id}. Type 'unlock' to release.")
+                    elif len(parts) == 2 and parts[1] in ("on", "off"):
+                        self._toggle_tracking(state=(parts[1] == "on"))
+                    else:
+                        print("[Cmd] Usage: track <number>  |  track on|off")
+                elif line == "unlock":
+                    st.lock_id = None
+                    print("[Target] Lock released — tracking largest person")
+                elif line == "ids":
+                    snap = dict(st.detected_ids)
+                    if snap:
+                        for tid, d in snap.items():
+                            marker = " ← LOCKED" if tid == st.lock_id else ""
+                            print(f"  ID {tid:3d}  center=({d.cx:.0f},{d.cy:.0f})"
+                                  f"  conf={d.conf:.2f}{marker}")
+                    else:
+                        print("[IDs] No persons currently detected")
+
+                # --- Gimbal pulses + center ---
+                elif line.startswith("zoom "):
+                    parts = line.split()
+                    if len(parts) == 2 and parts[1] in ("in", "out"):
+                        self._zoom_pulse(parts[1])
+                    else:
+                        print("[Cmd] Usage: zoom in|out")
+                elif line == "center":
+                    self._center_and_reset()
+
+                # --- Recording / streaming ---
+                elif line == "rec":
+                    self._toggle_recording()
+                elif line == "rec on":
+                    self._toggle_recording(state=True)
+                elif line == "rec off":
+                    self._toggle_recording(state=False)
+                elif line == "stream on":
+                    self._toggle_stream(state=True)
+                elif line == "stream off":
+                    self._toggle_stream(state=False)
+
+                # --- Search / autozoom ---
+                elif line == "search on":
+                    self._toggle_search(state=True)
+                elif line == "search off":
+                    self._toggle_search(state=False)
+                elif line == "search restart":
+                    self._restart_initial_scan()
+                elif line == "autozoom on":
+                    self._toggle_autozoom(state=True)
+                elif line == "autozoom off":
+                    self._toggle_autozoom(state=False)
+
+                # --- Manual gimbal speed ---
                 elif line.startswith("pan "):
                     if st.mode != "MANUAL":
                         print("[Cmd] Switch to MANUAL mode first ('mode manual')")
@@ -218,9 +280,15 @@ class OperatorInputController:
                     st.manual_key_t       = 0.0
                     self._ctrl.stop()
                     print("[Manual] Gimbal stopped")
+
+                # --- Quit ---
                 elif line == "q":
                     st.running = False
                     break
+
+                # --- Unknown ---
+                else:
+                    self._print_unknown(line)
             except Exception:
                 break
 
@@ -235,6 +303,68 @@ class OperatorInputController:
             print(f"[Cmd] {label} requested")
         else:
             print(f"[Cmd] {label} failed: {msg}")
+
+    def _handle_stdin_arm(self, on: bool) -> None:
+        """Stdin wrapper around the handle_arm callback.
+
+        Mirrors what the web UI's Arm/Stop-Follow buttons do but prints
+        an operator-friendly summary instead of returning JSON. The
+        underlying handler emits its own flight-log event ('arm' /
+        'disarm'); we do not log here to avoid double-entries.
+        """
+        verb = "arm" if on else "disarm"
+        cb   = self._handle_arm
+        if cb is None:
+            print(f"[Cmd] {verb} unavailable — handler not wired "
+                  "(launched without --drone?)")
+            return
+        try:
+            result = cb(on) or {}
+        except Exception as exc:
+            print(f"[Cmd] {verb} error: {exc}")
+            return
+        status = result.get("status", "error")
+        msg    = result.get("msg", "")
+        armed  = result.get("armed", False)
+        if status == "ok":
+            label = "ARMED" if armed else "DISARMED"
+            print(f"[Cmd] {label}" + (f" — {msg}" if msg else ""))
+        else:
+            print(f"[Cmd] {verb} refused: {msg or 'unknown error'}")
+
+    def _handle_stdin_estop(self) -> None:
+        """Software E-STOP for the SSH operator.
+
+        First press → handle_estop('brake').  A second press within
+        _ESTOP_DOUBLE_TAP_S escalates to handle_estop('land').
+        State is per-channel: this counter is independent of the
+        browser's copy inside StreamServer, so the SSH operator can
+        always escalate without depending on what the UI did.
+        """
+        cb = self._handle_estop
+        if cb is None:
+            print("[Cmd] estop unavailable — handler not wired")
+            return
+        now = time.monotonic()
+        if ((now - self._estop_last_t) < _ESTOP_DOUBLE_TAP_S
+                and self._estop_last_action == "brake"):
+            action = "land"
+        else:
+            action = "brake"
+        self._estop_last_t      = now
+        self._estop_last_action = action
+        try:
+            result = cb(action) or {}
+        except Exception as exc:
+            print(f"[Cmd] estop error: {exc}")
+            return
+        status = result.get("status", "error")
+        msg    = result.get("msg", "")
+        actual = str(result.get("action", action)).upper()
+        if status == "ok":
+            print(f"[Cmd] E-STOP -> {actual}")
+        else:
+            print(f"[Cmd] E-STOP -> {actual} FAILED: {msg or 'unknown error'}")
 
     # ------------------------------------------------------------------
     #  Stdin-only printers (SSH parity surface)
