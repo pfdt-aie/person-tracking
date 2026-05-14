@@ -710,14 +710,22 @@ async function runStream() {{
 
             def _check_token(self) -> bool:
                 """Allow request if route is read-only, token matches, or loopback-only."""
-                route = urllib.parse.urlparse(self.path).path
-                if route not in _CONTROL_PATHS:
-                    return True
-                if stream_token:
-                    params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
-                    return params.get('token', [''])[0] == stream_token
-                # No token configured: only allow from loopback
-                return self.client_address[0] in ('127.0.0.1', '::1')
+                # [TEST-MODE 2026-05-14] --stream-token enforcement disabled
+                # at the operator's explicit request to simplify testing.
+                # DO NOT REVERT THIS BLOCK without an explicit ask from the
+                # operator. Search for "[TEST-MODE 2026-05-14]" to find all
+                # disabled token gates when re-enabling.
+                return True
+                # --- original enforcement, intentionally left in place for
+                #     easy restoration: ---
+                # route = urllib.parse.urlparse(self.path).path
+                # if route not in _CONTROL_PATHS:
+                #     return True
+                # if stream_token:
+                #     params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                #     return params.get('token', [''])[0] == stream_token
+                # # No token configured: only allow from loopback
+                # return self.client_address[0] in ('127.0.0.1', '::1')
 
             def do_GET(self):
                 if not self._check_token():
@@ -877,10 +885,13 @@ async function runStream() {{
         for label, url in urls:
             print(f"  {label}  {url}")
 
-        if stream_host != '127.0.0.1' and not stream_token:
-            print("[STREAM] ⚠ WARNING: server exposed on all interfaces "
-                  "without --stream-token. Anyone on the LAN or tailnet "
-                  "can control the drone. Set a token immediately.")
+        # [TEST-MODE 2026-05-14] --stream-token warning suppressed at the
+        # operator's explicit request to keep test launches quiet.
+        # DO NOT REVERT this block without an explicit ask from the operator.
+        # if stream_host != '127.0.0.1' and not stream_token:
+        #     print("[STREAM] ⚠ WARNING: server exposed on all interfaces "
+        #           "without --stream-token. Anyone on the LAN or tailnet "
+        #           "can control the drone. Set a token immediately.")
 
     @staticmethod
     def _operator_urls(stream_host: str, port: int, token_qs: str) -> list:

@@ -4,6 +4,18 @@ This guide is for ground testing the person-tracking code before real flight.
 If `python main.py` works on your Jetson, you can use `python`. If not, use
 `python3` in the same commands.
 
+> **TEST MODE — `--stream-token` temporarily disabled (2026-05-14).**
+> Control-endpoint token enforcement and the no-token loopback fallback
+> in [`gcs/stream_server.py`](gcs/stream_server.py) `_check_token()`
+> are bypassed for the current test cycle, at the operator's request.
+> All examples below are written as if no token is needed — pass
+> `--stream-token` if you like, but it has no effect right now.
+>
+> To re-enable, search the codebase for `[TEST-MODE 2026-05-14]` (two
+> hits in `gcs/stream_server.py`), uncomment those blocks, then put
+> `--stream-token <secret>` back in the launches and `?token=<secret>`
+> back in the URLs.
+
 ## 1. Safe Launch Options
 
 ### Camera and gimbal only
@@ -12,13 +24,13 @@ Use this when you want person detection, gimbal tracking, and the web UI, but
 no drone-body MAVLink control.
 
 ```bash
-python3 main.py --stream-host 0.0.0.0 --stream-token MYSECRET
+python3 main.py --stream-host 0.0.0.0
 ```
 
 Open the web UI from your laptop/phone:
 
 ```text
-http://<jetson-ip>:8080/?token=MYSECRET
+http://<jetson-ip>:8080/
 ```
 
 ### Full pipeline ground test with FCU connected
@@ -28,7 +40,7 @@ preflight, RC link, GPS, battery, and safety checks without sending MAVLink
 commands.
 
 ```bash
-python3 main.py --drone --ground-test --stream-host 0.0.0.0 --stream-token MYSECRET
+python3 main.py --drone --ground-test --stream-host 0.0.0.0
 ```
 
 `--ground-test` means the program reads telemetry but does not transmit drone
@@ -42,7 +54,7 @@ movement, mode, RTL, BRAKE, or LAND commands.
 2. Open:
 
 ```text
-http://<jetson-ip>:8080/?token=MYSECRET
+http://<jetson-ip>:8080/
 ```
 
 3. Click on the person in the video.
@@ -202,7 +214,7 @@ RC emergency procedure.
 Only use this when you are ready for real drone-body control.
 
 ```bash
-python3 main.py --drone --stream-host 0.0.0.0 --stream-token MYSECRET
+python3 main.py --drone --stream-host 0.0.0.0
 ```
 
 Then:
@@ -307,8 +319,10 @@ q           Quit from terminal command
 
 ## 10. Available Web / HTTP Endpoints
 
-If `--stream-token MYSECRET` is set, add `?token=MYSECRET` to protected control
-endpoints.
+> Token enforcement is bypassed during the current test cycle (see the
+> banner at the top of this file). All endpoints below are reachable
+> without `?token=...`. When the bypass is reverted, append
+> `?token=<secret>` to every endpoint except `/estop`.
 
 ```text
 /                         Web operator page
@@ -333,20 +347,21 @@ endpoints.
 /estop                    E-STOP; first BRAKE, second LAND
 ```
 
-`/estop` does not require the token, so it remains reachable in an emergency.
+`/estop` is also exempt from token enforcement in production, so it
+remains reachable in an emergency regardless of test-mode state.
 
 ## 11. Recommended First Ground-Test Sequence
 
 1. Start dry-run with FCU connected:
 
 ```bash
-python3 main.py --drone --ground-test --stream-host 0.0.0.0 --stream-token test123
+python3 main.py --drone --ground-test --stream-host 0.0.0.0
 ```
 
 2. Open:
 
 ```text
-http://<jetson-ip>:8080/?token=test123
+http://<jetson-ip>:8080/
 ```
 
 3. Stand in front of the camera.
@@ -411,8 +426,9 @@ sudo iptables -L -n | grep 8080
 Expected:
 
 - `(1)` shows `0.0.0.0:8080` (or `*:8080`). If it shows `127.0.0.1:8080`
-  the tracker is loopback-only — relaunch with
-  `--stream-host 0.0.0.0` and a `--stream-token`.
+  the tracker is loopback-only — relaunch with `--stream-host 0.0.0.0`.
+  (When token enforcement is re-enabled later, also pass
+  `--stream-token <secret>`.)
 - `(2)` matches the IP you're typing in the browser URL.
 - `(3)` is empty, or has explicit ACCEPT rules for 8080.
 
