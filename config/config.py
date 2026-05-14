@@ -184,13 +184,13 @@ MAVLINK_BAUD: int    = 921600
 
 # --- Following geometry ---
 FOLLOW_ALTITUDE_M: float      = 12.0   # Target AGL altitude to maintain (m)
-FOLLOW_STANDOFF_M: float      = 8.0    # Horizontal distance to hold behind/away from person (m)
-MIN_PERSON_DRONE_SEP_M: float = 4.0    # Hard minimum separation — retreat if closer (m)
-MIN_VERTICAL_SEP_M: float     = 4.0    # Soft vertical clearance above person (m)
+FOLLOW_STANDOFF_M: float      = 12.0   # Horizontal distance to hold behind/away from person (m)
+MIN_PERSON_DRONE_SEP_M: float = 8.0    # Hard minimum separation — retreat if closer (m)
+MIN_VERTICAL_SEP_M: float     = 8.0    # Soft vertical clearance above person (m)
 RETREAT_SPEED_MS: float       = 1.0    # Speed used when actively backing away from subject
 RETREAT_HYSTERESIS_M: float   = 1.5    # Re-engage follow only when sep > MIN_SEP + this (m)
 STANDOFF_VEL_THRESHOLD_MS: float = 0.3 # Use person velocity direction above this speed (m/s)
-MAX_TRACKING_SPEED_MS: float  = 5.0    # Hard velocity cap (m/s) — SAFETY-CRITICAL
+MAX_TRACKING_SPEED_MS: float  = 1.5    # Hard velocity cap (m/s) — SAFETY-CRITICAL
 
 # --- Standoff bearing hysteresis (S2.6) ---
 # Person must sustain motion above STANDOFF_VEL_THRESHOLD_MS for this long
@@ -203,7 +203,7 @@ BEARING_SLEW_DEG_S: float     = 30.0
 MIN_ALT_M: float             = 10.0  # Absolute altitude floor (m AGL) — SAFETY-CRITICAL
 MAX_ALT_M: float             = 80.0  # Altitude ceiling (m AGL)
 GEOFENCE_RADIUS_M: float     = 500.0 # Circular geofence radius around home (m)
-HOME_KEEPOUT_RADIUS_M: float = 5.0   # No-fly cylinder around HOME (operator stands here)
+HOME_KEEPOUT_RADIUS_M: float = 12.0  # No-fly cylinder around HOME (operator stands here)
 
 # --- Proportional controller ---
 DRONE_KP: float     = 0.4    # Position error → velocity (m/s per meter of error)
@@ -212,7 +212,7 @@ DRONE_KP_YAW: float = 0.6    # Gimbal pan angle → drone yaw rate (rad/s per de
 # --- Velocity smoothing ---
 VEL_EMA_ALPHA: float  = 0.25    # EMA filter factor (0.1=smooth/laggy, 0.5=responsive)
 MAX_JERK_MS3: float   = 2.0     # Jerk limit (m/s³)
-MAX_ACCEL_MS2: float  = 2.0     # Hard acceleration cap (m/s²) applied after jerk limiter
+MAX_ACCEL_MS2: float  = 0.5     # Hard acceleration cap (m/s²) applied after jerk limiter
 
 # --- MAVLink send rate ---
 DRONE_CMD_RATE_HZ: int   = 10   # Velocity command send rate
@@ -247,6 +247,9 @@ GIMBAL_PAN_HARD_DEG: float  = 120.0   # Drone rotates aggressively
 HEARTBEAT_WATCHDOG_S: float  = 2.0    # Max seconds without MAVLink heartbeat
 HEARTBEAT_WARN_S: float      = 1.0    # Early warning threshold (between HBs)
 GPS_MIN_FIX_TYPE: int        = 3      # Minimum GPS fix (3 = 3D fix)
+RC_WATCHDOG_S: float         = 2.0    # Max seconds since last RC_CHANNELS message
+RC_MIN_CHANNELS: int         = 4      # Minimum populated channels for "link healthy"
+TELEMETRY_STALE_S: float     = 3.0    # Max age for required FCU telemetry streams
 GPS_MAX_HDOP: float          = 1.5    # Reject if HDOP > this
 GPS_MIN_SATS: int            = 10     # Reject if visible sats < this
 EKF_MAX_VARIANCE: float      = 1.0    # Reject if FCU EKF horizontal variance > this

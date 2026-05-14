@@ -1,6 +1,7 @@
 """S1.2 — --ground-test mode must suppress every MAVLink TX path."""
 import pathlib
 import sys
+import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
@@ -71,6 +72,41 @@ def test_normal_mode_does_emit_tx():
     """Sanity check the spy + client wiring with ground_test=False."""
     c, spy = _client(ground_test=False)
     c.send_velocity_ned(0.0, 0.0, 0.0)
+    kinds = [t[0] for t in spy.tx]
+    assert "pos_target" in kinds
+
+
+def test_live_guard_drops_nonzero_command_when_rc_lost():
+    c, spy = _client(ground_test=False)
+    c._running = True
+    c._hb_time = time.monotonic()
+    c._mode = "GUIDED"
+    c._armed = True
+    c._rc_last_t = 0.0
+    c.send_velocity_ned(1.0, 0.0, 0.0)
+    assert spy.tx == []
+
+
+def test_live_guard_drops_nonzero_command_when_rx_loop_stopped():
+    c, spy = _client(ground_test=False)
+    c._running = False
+    c._hb_time = time.monotonic()
+    c._mode = "GUIDED"
+    c._armed = True
+    c._rc_last_t = time.monotonic()
+    c._rc_chancount = 8
+    c.send_velocity_ned(1.0, 0.0, 0.0)
+    assert spy.tx == []
+
+
+def test_live_guard_allows_zero_hold_when_rc_lost():
+    c, spy = _client(ground_test=False)
+    c._running = True
+    c._hb_time = time.monotonic()
+    c._mode = "GUIDED"
+    c._armed = True
+    c._rc_last_t = 0.0
+    c.send_zero_velocity()
     kinds = [t[0] for t in spy.tx]
     assert "pos_target" in kinds
 

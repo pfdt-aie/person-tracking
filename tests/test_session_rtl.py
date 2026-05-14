@@ -19,7 +19,9 @@ from control.drone_controller import DroneController
 class _FakeMav:
     def __init__(self):
         self.rtl_calls = 0
+        self.loiter_calls = 0
         self.last_velocity = None
+        self.rc_connected = True
 
     # Health gates always pass so update() reaches the session check.
     def is_connected(self):           return True
@@ -34,12 +36,15 @@ class _FakeMav:
     def get_home_position(self):       return (51.5, -0.1, 0.0)
     def is_fence_breached(self):       return False
     def is_rc_override_active(self):   return False
+    def is_rc_connected(self):         return self.rc_connected
     def is_ground_test(self):          return False
     # Capture commands
     def send_rtl(self):
         self.rtl_calls += 1
         return True
-    def send_loiter(self):             return True
+    def send_loiter(self):
+        self.loiter_calls += 1
+        return True
     def send_zero_velocity(self):      self.last_velocity = (0, 0, 0)
     def send_velocity_ned(self, *a):   self.last_velocity = a
     def send_position_velocity_ned(self, *a): self.last_velocity = a
@@ -99,6 +104,7 @@ def _controller(mav, safety):
     c._bearing_init = False
     c._session_start_t = -1.0
     c._session_rtl_issued = False
+    c._rc_loss_loiter_issued = False
     c._fps_times = deque(maxlen=cfg.FPS_WINDOW_SIZE)
     c._fps_warned = False
     c._ema_vn = c._ema_ve = 0.0
@@ -155,3 +161,13 @@ def test_disarm_clears_timer_and_latch():
     c.update(0.0, -45.0, None, drone_tracking_enabled=False)
     assert c._session_start_t < 0
     assert c._session_rtl_issued is False
+
+
+def test_runtime_rc_loss_issues_loiter_once():
+    mav = _FakeMav()
+    mav.rc_connected = False
+    c = _controller(mav, _FakeSafety())
+    c.update(0.0, -45.0, None, drone_tracking_enabled=True)
+    c.update(0.0, -45.0, None, drone_tracking_enabled=True)
+    assert mav.loiter_calls == 1
+    assert mav.last_velocity == (0, 0, 0)

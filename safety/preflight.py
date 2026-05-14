@@ -67,6 +67,7 @@ class PreflightCheck:
         checks.append(self._check_home_set())
         checks.append(self._check_gps())
         checks.append(self._check_sensors())
+        checks.append(self._check_rc_link())
         checks.append(self._check_fence())
         checks.append(self._check_battery())
         checks.append(self._check_params())
@@ -142,12 +143,25 @@ class PreflightCheck:
             fix   = int(self._mav.get_gps_fix())
             hdop  = float(self._mav.get_gps_hdop())
             sats  = int(self._mav.get_sat_count())
+            fresh = {
+                "GLOBAL_POSITION_INT": bool(self._mav.is_global_position_fresh()),
+                "GPS_RAW_INT": bool(self._mav.is_gps_raw_fresh()),
+                "EKF_STATUS_REPORT": bool(self._mav.is_ekf_status_fresh()),
+            }
         except Exception:
             ok, fix, hdop, sats = False, 0, 99.99, 0
+            fresh = {
+                "GLOBAL_POSITION_INT": False,
+                "GPS_RAW_INT": False,
+                "EKF_STATUS_REPORT": False,
+            }
         if ok:
             msg = f"fix={fix} sats={sats} HDOP={hdop:.2f}"
         else:
             reasons = []
+            for name, is_fresh in fresh.items():
+                if not is_fresh:
+                    reasons.append(f"{name} stale/missing")
             if fix < cfg.GPS_MIN_FIX_TYPE:
                 reasons.append(f"fix={fix}<{cfg.GPS_MIN_FIX_TYPE}")
             if hdop > cfg.GPS_MAX_HDOP:
@@ -159,13 +173,62 @@ class PreflightCheck:
 
     def _check_sensors(self) -> PreflightItem:
         try:
+            fresh = bool(self._mav.is_sys_status_fresh())
             ok = bool(self._mav.is_sensors_healthy())
         except Exception:
+            fresh = False
             ok = False
         return PreflightItem(
             name="IMU / mag / baro healthy",
             ok=ok,
-            message="" if ok else "SYS_STATUS reports a degraded sensor",
+            message="" if ok else (
+                "SYS_STATUS stale/missing" if not fresh
+                else "SYS_STATUS reports a degraded sensor"
+            ),
+        )
+
+    def _check_rc_link(self) -> PreflightItem:
+        """RC transmitter must be ON before takeoff is permitted.
+
+        The FCU forwards RC_CHANNELS whenever the receiver is delivering
+        frames. Absence of recent RC_CHANNELS == RC link down, which
+        means the operator cannot take manual control if the autonomous
+        tracker misbehaves. Arming is refused in this state.
+
+        Ground-test mode relaxes this — the operator may bench-test
+        without an RC system powered on.
+        """
+        if self._ground_test:
+            return PreflightItem(
+                name="RC transmitter connected",
+                ok=True,
+                message="skipped in --ground-test",
+            )
+        try:
+            ok = bool(self._mav.is_rc_connected())
+        except Exception:
+            ok = False
+        if ok:
+            try:
+                count = int(self._mav.get_rc_channel_count())
+                rssi  = int(self._mav.get_rc_rssi())
+            except Exception:
+                count, rssi = 0, 0
+            return PreflightItem(
+                name="RC transmitter connected",
+                ok=True,
+                message=f"{count} channels"
+                        + (f" · RSSI {rssi}" if rssi > 0 else ""),
+            )
+        try:
+            age = float(self._mav.get_rc_age_s())
+        except Exception:
+            age = float("inf")
+        msg = (f"no RC_CHANNELS for {age:.1f}s - turn on transmitter "
+               "and check bind") if age != float("inf") \
+              else "RC_CHANNELS never received - transmitter off or unbound"
+        return PreflightItem(
+            name="RC transmitter connected", ok=False, message=msg,
         )
 
     def _check_fence(self) -> PreflightItem:

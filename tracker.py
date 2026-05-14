@@ -435,6 +435,8 @@ class PersonGimbalTracker:
                 out["battery_v"]   = round(float(self.mav.get_battery_voltage()), 2)
                 out["fence_breach"] = bool(self.mav.is_fence_breached())
                 out["rc_override"] = bool(self.mav.is_rc_override_active())
+                out["rc_connected"] = bool(self.mav.is_rc_connected())
+                out["rc_rssi"]     = int(self.mav.get_rc_rssi())
                 out["home_set"]    = bool(self.mav.is_home_set())
                 out["sensors_ok"]  = bool(self.mav.is_sensors_healthy())
                 out["ground_test"] = bool(self.mav.is_ground_test())

@@ -10,9 +10,9 @@ from control.drone_controller import DroneController
 
 
 def test_within_cap_unchanged():
-    an, ae = DroneController._clamp_accel(0.5, 0.5)
-    assert math.isclose(an, 0.5)
-    assert math.isclose(ae, 0.5)
+    an, ae = DroneController._clamp_accel(0.3, 0.3)
+    assert math.isclose(an, 0.3)
+    assert math.isclose(ae, 0.3)
 
 
 def test_exceeds_cap_scaled_to_limit():
