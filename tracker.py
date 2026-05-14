@@ -192,6 +192,9 @@ class PersonGimbalTracker:
         )
 
         # --- OperatorInputController (stdin + keyboard) ---
+        # SSH parity: the four handle_* callbacks expose the same actions
+        # the browser hits over HTTP (E-STOP, arm/disarm, preflight,
+        # telemetry) so the SSH stdin loop can drive them directly.
         self._op_input = OperatorInputController(
             state        = self._ts,
             ctrl         = self.ctrl,
@@ -209,6 +212,10 @@ class PersonGimbalTracker:
             init_scan    = self.init_scan,
             expand_search = self.expand_search,
             lissajous    = self.lissajous,
+            handle_estop     = self._handle_estop,
+            handle_arm       = self._handle_arm,
+            handle_preflight = self._handle_preflight,
+            handle_telemetry = self._handle_telemetry,
         )
         self._cmd_thread = self._op_input.start()
 
