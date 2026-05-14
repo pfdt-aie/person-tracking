@@ -221,20 +221,70 @@ removed or the airframe is otherwise made safe.
 
 ## 8. Available Terminal Commands
 
+The running tracker reads commands from stdin. Type `help` at any time
+to print the full list — this section is regenerated from the same
+`_HELP` table the program uses, so the two cannot drift.
+
 ```text
-ids                 Show detected person IDs
-track <id>          Lock onto person ID
-unlock              Release person lock
-mode auto           Automatic tracking mode
-mode manual         Manual gimbal mode
-mode brake          Stop drone-body following and send BRAKE
-mode land           Stop drone-body following and send LAND
-mode rtl            Stop drone-body following and send RTL / return-to-home
-pan <speed>         Manual pan speed, -100 to 100
-tilt <speed>        Manual tilt speed, -100 to 100
-stop                Stop manual gimbal motion
-q                   Quit program
+help                   show this command list
+status [json]          current telemetry snapshot (json = raw dict)
+preflight              run the preflight checklist
+ids                    list detected person IDs
+track <id>             lock onto a numeric person ID
+track on|off           enable/disable autonomous tracking
+unlock                 release current person lock
+mode                   print current tracker mode
+mode auto|manual       set tracker mode
+mode brake|land|rtl    request FCU safety mode (--drone required)
+arm                    arm drone-body tracker after preflight (--drone)
+disarm                 stop following (tracker only; FCU mode unchanged)
+estop                  BRAKE; press again within 3s for LAND
+pan <-100..100>        manual gimbal pan speed (MANUAL mode)
+tilt <-100..100>       manual gimbal tilt speed (MANUAL mode)
+stop                   stop manual gimbal motion
+zoom in|out            0.5 s zoom pulse (also disables auto-zoom)
+rec [on|off]           toggle/start/stop recording (no arg = toggle)
+stream on|off          start/stop live MJPEG stream server
+search on|off|restart  toggle search or restart initial acquisition scan
+center                 center gimbal and reset zoom to 1x
+autozoom on|off        toggle auto-zoom
+q                      quit program
 ```
+
+Notes:
+
+- Unknown commands are answered with `[Cmd] unknown: ... — type 'help'`
+  and logged to the structured flight log under `ssh_unknown_command`.
+- `arm`, `disarm`, and `estop` print `[Cmd] ... unavailable` when the
+  tracker was launched without `--drone`. No MAVLink command is sent.
+- `disarm` only stops drone-body following inside the tracker. To
+  command the FCU itself, use `mode brake`, `mode land`, or `mode rtl`.
+- `estop` double-tap escalation is independent per channel: the SSH
+  3-second window is separate from the web UI's. Either channel can
+  always escalate BRAKE → LAND on its own.
+
+### Web UI &harr; Terminal parity
+
+Every web button has a stdin equivalent (and several stdin commands
+exist that have no UI counterpart).
+
+| Web UI action                | Terminal equivalent           |
+|------------------------------|-------------------------------|
+| Click person in video        | `ids` then `track <id>`       |
+| UNLOCK button                | `unlock`                      |
+| ARM &#9662; &rarr; Arm Tracker | `arm`                        |
+| ARM &#9662; &rarr; Stop Follow | `disarm`                     |
+| Preflight panel              | `preflight`                   |
+| Mode toggle AUTO/MANUAL      | `mode auto` &middot; `mode manual` |
+| BRAKE button                 | `mode brake`                  |
+| LAND button                  | `mode land`                   |
+| RTL button                   | `mode rtl`                    |
+| E-STOP button                | `estop` (double-tap escalates) |
+| Zoom I / O                   | `zoom in` &middot; `zoom out` |
+| Telemetry strip              | `status`                      |
+| D-pad &#8593;/&#8595;/&#8592;/&#8594; | `mode manual` then `pan <±>` / `tilt <±>` |
+| D-pad &#9632; stop           | `stop`                        |
+| _(none — terminal-only)_     | `help`, `status json`, `center`, `rec`, `stream on/off`, `search on/off/restart`, `track on/off`, `autozoom on/off`, `q` |
 
 ## 9. Available Keyboard Controls
 
@@ -247,8 +297,8 @@ t           Tracking on/off
 r           Center gimbal and reset zoom
 s           Toggle search
 i           Restart initial scan
-z           Zoom in
-x           Zoom out
+z           Zoom in  (also disables auto-zoom)
+x           Zoom out (also disables auto-zoom)
 a           Auto-zoom on/off
 v           Recording on/off
 l           Live stream on/off
@@ -340,3 +390,32 @@ mode rtl
 ```text
 q
 ```
+
+## 12. Troubleshooting
+
+### Web UI not reachable (`http://<tailscale-ip>:8080/` shows "site can't be reached")
+
+On the Jetson, run these three commands to localize the failure:
+
+```bash
+# (1) Is the tracker actually listening on 8080?
+ss -tlnp | grep 8080
+
+# (2) Does Tailscale agree on which IP is yours?
+tailscale ip -4
+
+# (3) Is anything firewalling 8080 locally?
+sudo iptables -L -n | grep 8080
+```
+
+Expected:
+
+- `(1)` shows `0.0.0.0:8080` (or `*:8080`). If it shows `127.0.0.1:8080`
+  the tracker is loopback-only — relaunch with
+  `--stream-host 0.0.0.0` and a `--stream-token`.
+- `(2)` matches the IP you're typing in the browser URL.
+- `(3)` is empty, or has explicit ACCEPT rules for 8080.
+
+While the UI is unreachable, the SSH stdin loop gives you full control
+of the tracker — every web button has a terminal equivalent listed in
+Section 8 ("Web UI &harr; Terminal parity").
