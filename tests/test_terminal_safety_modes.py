@@ -401,3 +401,31 @@ def test_stdin_estop_routes_with_double_tap(monkeypatch):
     _drive_stdin(monkeypatch, c, ["estop", "estop"])
     actions = [call.args[0] for call in cb.call_args_list]
     assert actions == ["brake", "land"]
+
+
+def test_stdin_handler_exception_does_not_kill_loop(monkeypatch, capsys):
+    """One bad command must not silently kill the SSH input thread.
+
+    Before the Commit-B hardening this raised → `except Exception: break`,
+    leaving the operator with a dead loop and no error shown. The fix
+    catches handler exceptions, prints them, logs to flight_log, and
+    continues reading commands.
+
+    We monkeypatch a helper that has no inner try/except (_toggle_tracking)
+    so the failure bubbles to the new outer guard rather than being
+    swallowed by per-verb wrappers like _handle_stdin_arm.
+    """
+    calls = {"n": 0}
+    def flaky(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom")
+    c = _make_op()
+    monkeypatch.setattr(c, "_toggle_tracking", flaky)
+    _drive_stdin(monkeypatch, c, ["track on", "track on"])
+    out = capsys.readouterr().out
+    assert "error handling 'track on'" in out
+    assert "boom" in out
+    # Most important assertion: the second 'track on' reached the
+    # helper, so the loop survived the first exception.
+    assert calls["n"] == 2

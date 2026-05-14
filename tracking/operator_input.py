@@ -149,14 +149,23 @@ class OperatorInputController:
               "Quick: track <id> | unlock | ids | status | preflight | "
               "mode auto|manual | arm | disarm | estop | q")
         while st.running:
+            # Narrow I/O try: a stdin failure means the thread really
+            # cannot recover (stdin closed, pipe broken), so break out.
             try:
                 line = sys.stdin.readline()
-                if not line:
-                    break
-                line = line.strip().lower()
-                if not line:
-                    continue
+            except Exception:
+                break
 
+            if not line:
+                break
+            line = line.strip().lower()
+            if not line:
+                continue
+
+            # Command-handling try: one bad command must NOT kill the
+            # whole SSH input thread. Pre-Phase-4 this raised → break,
+            # leaving the operator with a dead loop and no error shown.
+            try:
                 # --- Info / discovery ---
                 if line == "help":
                     self._print_help()
@@ -289,8 +298,15 @@ class OperatorInputController:
                 # --- Unknown ---
                 else:
                     self._print_unknown(line)
-            except Exception:
-                break
+            except Exception as exc:
+                print(f"[Cmd] error handling {line!r}: {exc}")
+                try:
+                    from utils.flight_log import get_flight_log
+                    get_flight_log().event(
+                        "ssh_command_error", line=line, error=str(exc),
+                    )
+                except Exception:
+                    pass
 
     def _handle_safety_mode(self, label: str, cb: Optional[Callable[[], dict]]) -> None:
         if cb is None:
