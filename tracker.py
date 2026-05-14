@@ -351,8 +351,26 @@ class PersonGimbalTracker:
                                drone_enabled=self._drone_enabled)
         try:
             self._ts.tracking_enabled = False
-            self._ts.drone_armed = False
+            # B2: emit the disarm event from here when E-STOP is what
+            # actually disarms the tracker. A subsequent operator
+            # 'disarm' command therefore won't double-log the same
+            # transition (see _handle_arm idempotency below).
+            if self._ts.drone_armed:
+                self._ts.drone_armed = False
+                get_flight_log().event(
+                    "disarm", reason="estop", action=action,
+                )
             self.drone_ctrl.reset()
+            # B3: stop manual gimbal motion. Without this an operator
+            # mid-'pan 50' in MANUAL mode would keep panning after the
+            # estop fired — surprising and arguably unsafe near a person.
+            self._ts.manual_yaw_speed   = 0
+            self._ts.manual_pitch_speed = 0
+            self._ts.manual_key_t       = 0.0
+            try:
+                self.ctrl.stop()
+            except Exception as exc:
+                print(f"[ESTOP] gimbal stop error: {exc}")
         except Exception as exc:
             print(f"[ESTOP] tracker reset error: {exc}")
 
@@ -438,11 +456,18 @@ class PersonGimbalTracker:
             return {"armed": bool(self._ts.drone_armed), "status": "ok", "msg": ""}
 
         if not on:
+            # B2: idempotent disarm. Only print + log when actually
+            # transitioning from armed → disarmed, so repeated 'disarm'
+            # commands (or a 'disarm' after an E-STOP that already
+            # disarmed) don't pollute the flight log with phantom events.
+            was_armed = self._ts.drone_armed
             self._ts.drone_armed = False
-            print("[Arm] Drone-body tracker DISARMED by operator")
-            from utils.flight_log import get_flight_log
-            get_flight_log().event("disarm")
-            return {"armed": False, "status": "ok", "msg": "disarmed"}
+            if was_armed:
+                print("[Arm] Drone-body tracker DISARMED by operator")
+                from utils.flight_log import get_flight_log
+                get_flight_log().event("disarm", source="operator")
+                return {"armed": False, "status": "ok", "msg": "disarmed"}
+            return {"armed": False, "status": "ok", "msg": "already disarmed"}
 
         if not self._drone_enabled:
             return {"armed": False, "status": "error",

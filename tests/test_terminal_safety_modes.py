@@ -72,6 +72,10 @@ def _tracker():
     t.mav = _FakeMav()
     t.drone_ctrl = _FakeDroneController()
     t._gsm = _FakeGsm()
+    # _handle_estop now stops manual gimbal motion (B3) so the gimbal
+    # controller must be addressable. MagicMock keeps the helper usable
+    # for every existing _request_* test that previously ignored ctrl.
+    t.ctrl = MagicMock(name="ctrl")
     return t
 
 
@@ -109,6 +113,91 @@ def test_manual_mode_sends_zero_velocity_and_requires_rearm():
     assert t._ts.mode == "MANUAL"
     assert t._ts.state == State.WAITING
     assert t.mav.calls == ["zero"]
+
+
+# ----------------------------------------------------------------------
+#  _handle_estop hardening (Commit C — B2 + B3)
+# ----------------------------------------------------------------------
+
+class _StubLog:
+    """Capture flight-log events so tests can inspect what was emitted."""
+    def __init__(self):
+        self.events: list[tuple] = []
+    def event(self, name, **fields):
+        self.events.append((name, fields))
+
+
+def _patch_flight_log(monkeypatch):
+    """Install a _StubLog under utils.flight_log.get_flight_log and return it."""
+    stub = _StubLog()
+    monkeypatch.setattr("utils.flight_log.get_flight_log", lambda: stub)
+    return stub
+
+
+def test_estop_zeroes_manual_gimbal_speeds_and_calls_ctrl_stop(monkeypatch):
+    """B3: an E-STOP mid-pan/tilt must also stop the manual gimbal."""
+    _patch_flight_log(monkeypatch)
+    t = _tracker()
+    t._ts.manual_yaw_speed   = 50
+    t._ts.manual_pitch_speed = -30
+    t._ts.manual_key_t       = 9999999.0
+    t._handle_estop("brake")
+    assert t._ts.manual_yaw_speed   == 0
+    assert t._ts.manual_pitch_speed == 0
+    assert t._ts.manual_key_t       == 0.0
+    assert t.ctrl.stop.called
+
+
+def test_estop_logs_disarm_event_with_reason(monkeypatch):
+    """B2: when E-STOP disarms the tracker it emits a disarm event itself."""
+    log = _patch_flight_log(monkeypatch)
+    t = _tracker()    # starts armed
+    t._handle_estop("brake")
+    names = [name for name, _ in log.events]
+    assert "estop" in names
+    assert "disarm" in names
+    disarm = next(fields for name, fields in log.events if name == "disarm")
+    assert disarm.get("reason") == "estop"
+    assert disarm.get("action") == "brake"
+
+
+def test_estop_when_already_disarmed_does_not_log_disarm(monkeypatch):
+    """B2: idempotent — no spurious disarm event when nothing changes."""
+    log = _patch_flight_log(monkeypatch)
+    t = _tracker()
+    t._ts.drone_armed = False     # already disarmed
+    t._handle_estop("brake")
+    disarm_events = [e for e in log.events if e[0] == "disarm"]
+    assert disarm_events == []
+
+
+def test_disarm_after_estop_does_not_double_log(monkeypatch):
+    """B2: the operator's follow-up 'disarm' on an already-disarmed
+    tracker must not emit a second disarm event."""
+    log = _patch_flight_log(monkeypatch)
+    t = _tracker()
+    t.preflight = MagicMock()    # _handle_arm only consults preflight when arming
+    # First action: E-STOP disarms and logs one disarm with reason=estop.
+    t._handle_estop("brake")
+    disarms_after_estop = [e for e in log.events if e[0] == "disarm"]
+    assert len(disarms_after_estop) == 1
+    # Operator now types 'disarm' — should be a no-op, no new event.
+    result = t._handle_arm(False)
+    assert result["status"] == "ok"
+    assert result["msg"] == "already disarmed"
+    disarms_total = [e for e in log.events if e[0] == "disarm"]
+    assert len(disarms_total) == 1, log.events
+
+
+def test_handle_arm_disarm_emits_event_when_transitioning(monkeypatch):
+    """Sanity: when 'disarm' actually transitions armed → disarmed, log fires."""
+    log = _patch_flight_log(monkeypatch)
+    t = _tracker()    # starts armed
+    result = t._handle_arm(False)
+    assert result["msg"] == "disarmed"
+    disarms = [e for e in log.events if e[0] == "disarm"]
+    assert len(disarms) == 1
+    assert disarms[0][1].get("source") == "operator"
 
 
 # ----------------------------------------------------------------------
