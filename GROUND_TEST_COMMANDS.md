@@ -160,6 +160,30 @@ drone-body following.
 
 ## 6. Safety Mode Commands
 
+### What E-STOP does
+
+Whether the operator triggers it from the web UI button, the SSH
+`estop` command, or `curl /estop`, a single E-STOP press performs
+**all** of the following in order:
+
+1. Disables autonomous person tracking (`tracking_enabled = False`).
+2. Disarms the drone-body tracker (`drone_armed = False`) and emits a
+   structured `disarm` flight-log event with `reason="estop"`.
+3. Resets the drone controller state (EMA filter, jerk limiter,
+   bearing latch, retreat latch, etc.).
+4. **Stops the gimbal**, including any manual pan/tilt that was in
+   progress (`manual_yaw_speed = manual_pitch_speed = 0` plus
+   `ctrl.stop()`). Without this, an operator mid-`pan 50` in MANUAL
+   mode would keep panning after E-STOP fired.
+5. Sends `BRAKE` to the FCU on the first press. A second press within
+   3 seconds escalates to `LAND`. Each channel (SSH stdin and the
+   browser) keeps its own 3-second window — they do not desync each
+   other, so SSH can always escalate without depending on the UI.
+
+`/estop` is the only HTTP endpoint exempt from the `--stream-token`
+gate (when enforcement is enabled), so it remains reachable for life
+safety regardless of token state.
+
 ### Web UI
 
 Use the red **E-STOP** button:
