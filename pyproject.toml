@@ -1,0 +1,38 @@
+[project]
+name = "person-tracking-drone"
+version = "10.0.0"
+description = "SIYI A8 mini + ArduPilot person-tracking system for Jetson Orin Nano."
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+exclude = [
+    "models",
+    "logs",
+    "recordings",
+    ".pytest_cache",
+    "__pycache__",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "W",    # pycodestyle warnings
+    "B",    # flake8-bugbear
+    "I",    # isort
+    "UP",   # pyupgrade
+]
+ignore = [
+    "E501",   # line-length is enforced by `line-length`, ignore long-string warnings
+    "E741",   # ambiguous variable name (vN, vE, vD are clearer than alternatives)
+    "B008",   # function call in default arg (dataclass field(default_factory=...))
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]   # tests intentionally insert sys.path before imports
