@@ -33,7 +33,6 @@ import threading
 import time
 from typing import Optional
 
-import config as cfg
 from config.settings import Settings, load_settings
 from safety import SafetyMonitor
 from utils.flight_log import safe_event
@@ -119,7 +118,7 @@ class MAVLinkClient:
         self._home_alt:     float = 0.0
         self._home_set:     bool  = False
 
-        self._cell_count:   int   = cfg.DEFAULT_CELLS
+        self._cell_count:   int   = self._s.default_cells
         self._cell_detected: bool = False
 
         # C1: ArduPilot onboard fence breach
@@ -426,7 +425,7 @@ class MAVLinkClient:
             return
 
         v_mv    = self._vbat_mv
-        nominal = cfg.CELL_NOMINAL_MV  # e.g. 3700 mV
+        nominal = self._s.cell_nominal_mv  # e.g. 3700 mV
         ratio   = v_mv / nominal
         estimated = round(ratio)
         # Distance from nearest integer (0.0 = perfect, 0.5 = ambiguous).
@@ -449,7 +448,7 @@ class MAVLinkClient:
                 f"[MAVLink] Battery cell detection ambiguous "
                 f"({v_mv}mV / {nominal}mV = {ratio:.2f}, "
                 f"confidence={confidence}) — using default "
-                f"{cfg.DEFAULT_CELLS}S. Override with --cells N."
+                f"{self._s.default_cells}S. Override with --cells N."
             )
 
     # ------------------------------------------------------------------
@@ -515,11 +514,10 @@ class MAVLinkClient:
         with self._lock:
             return self._ekf_status_seen
 
-    @staticmethod
-    def _fresh(ts: float, max_age_s: float | None = None) -> bool:
+    def _fresh(self, ts: float, max_age_s: float | None = None) -> bool:
         if ts <= 0.0:
             return False
-        limit = cfg.TELEMETRY_STALE_S if max_age_s is None else max_age_s
+        limit = self._s.telemetry_stale_s if max_age_s is None else max_age_s
         return (time.monotonic() - ts) <= limit
 
     def is_global_position_fresh(self) -> bool:
@@ -573,13 +571,13 @@ class MAVLinkClient:
             ekf_ok    = self._fresh(self._ekf_status_t)
         if not (global_ok and gps_ok and ekf_ok):
             return False
-        if fix < cfg.GPS_MIN_FIX_TYPE:
+        if fix < self._s.gps_min_fix_type:
             return False
-        if hdop > cfg.GPS_MAX_HDOP:
+        if hdop > self._s.gps_max_hdop:
             return False
-        if sats < cfg.GPS_MIN_SATS:
+        if sats < self._s.gps_min_sats:
             return False
-        if ekf_var > cfg.EKF_MAX_VARIANCE:
+        if ekf_var > self._s.ekf_max_variance:
             return False
         return True
 
@@ -642,9 +640,9 @@ class MAVLinkClient:
             count = self._rc_chancount
         if last <= 0.0:
             return False
-        if (time.monotonic() - last) > cfg.RC_WATCHDOG_S:
+        if (time.monotonic() - last) > self._s.rc_watchdog_s:
             return False
-        return count >= cfg.RC_MIN_CHANNELS
+        return count >= self._s.rc_min_channels
 
     def get_rc_age_s(self) -> float:
         """Seconds since the last RC_CHANNELS message. inf if never seen."""

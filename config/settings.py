@@ -99,8 +99,18 @@ class Settings:
     heartbeat_watchdog_s:   float = _cfg.HEARTBEAT_WATCHDOG_S
     heartbeat_warn_s:       float = _cfg.HEARTBEAT_WARN_S
     cell_critical_mv:       int   = _cfg.CELL_CRITICAL_MV
+    cell_nominal_mv:        int   = _cfg.CELL_NOMINAL_MV
     default_cells:          int   = _cfg.DEFAULT_CELLS
     home_keepout_radius_m:  float = _cfg.HOME_KEEPOUT_RADIUS_M
+
+    # --- Telemetry quality gates ---
+    telemetry_stale_s:      float = _cfg.TELEMETRY_STALE_S
+    gps_min_fix_type:       int   = _cfg.GPS_MIN_FIX_TYPE
+    gps_min_sats:           int   = _cfg.GPS_MIN_SATS
+    gps_max_hdop:           float = _cfg.GPS_MAX_HDOP
+    ekf_max_variance:       float = _cfg.EKF_MAX_VARIANCE
+    rc_watchdog_s:          float = _cfg.RC_WATCHDOG_S
+    rc_min_channels:        int   = _cfg.RC_MIN_CHANNELS
 
     # --- Ground-test (S1.2) ---
     # When True the MAVLinkClient logs every intended TX but never actually
