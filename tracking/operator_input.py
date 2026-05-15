@@ -18,6 +18,7 @@ import cv2
 import config as cfg
 from tracking.state_machine import State
 from tracking.tracker_state import TrackerState
+from utils.flight_log import safe_event
 
 
 # Window for the E-STOP double-tap escalation in the SSH stdin loop.
@@ -43,6 +44,7 @@ _HELP: list[tuple[str, str]] = [
     ("mode brake|land|rtl",        "request FCU safety mode (--drone required)"),
     ("arm",                        "arm drone-body tracker after preflight (--drone)"),
     ("disarm",                     "stop following (tracker only; FCU mode unchanged)"),
+    ("takeoff [alt]",              "command FCU takeoff to alt m AGL (default 7) — --drone, FCU armed + landed"),
     ("estop",                      "BRAKE; press again within 3s for LAND"),
     ("pan <-100..100>",            "manual gimbal pan speed (MANUAL mode)"),
     ("tilt <-100..100>",           "manual gimbal tilt speed (MANUAL mode)"),
@@ -97,6 +99,7 @@ class OperatorInputController:
         request_brake: Optional[Callable[[], dict]] = None,
         handle_estop:     Optional[Callable[[str], dict]]       = None,
         handle_arm:       Optional[Callable[[Optional[bool]], dict]] = None,
+        handle_takeoff:   Optional[Callable[[Optional[float]], dict]] = None,
         handle_preflight: Optional[Callable[[], list]]          = None,
         handle_telemetry: Optional[Callable[[], dict]]          = None,
     ) -> None:
@@ -120,6 +123,7 @@ class OperatorInputController:
         # SSH-parity callbacks (browser-equivalent actions for stdin use).
         self._handle_estop     = handle_estop
         self._handle_arm       = handle_arm
+        self._handle_takeoff   = handle_takeoff
         self._handle_preflight = handle_preflight
         self._handle_telemetry = handle_telemetry
 
@@ -147,7 +151,7 @@ class OperatorInputController:
         st = self._state
         print("[Cmd] Stdin command loop ready — type 'help' for the full list. "
               "Quick: track <id> | unlock | ids | status | preflight | "
-              "mode auto|manual | arm | disarm | estop | q")
+              "mode auto|manual | arm | disarm | takeoff [alt] | estop | q")
         while st.running:
             # Narrow I/O try: a stdin failure means the thread really
             # cannot recover (stdin closed, pipe broken), so break out.
@@ -207,6 +211,19 @@ class OperatorInputController:
                     self._handle_stdin_arm(True)
                 elif line == "disarm":
                     self._handle_stdin_arm(False)
+                elif line == "takeoff" or line.startswith("takeoff "):
+                    parts = line.split()
+                    if len(parts) == 1:
+                        self._handle_stdin_takeoff(None)
+                    elif len(parts) == 2:
+                        try:
+                            alt = float(parts[1])
+                        except ValueError:
+                            print(f"[Cmd] Usage: takeoff [alt_m]  (got {parts[1]!r})")
+                        else:
+                            self._handle_stdin_takeoff(alt)
+                    else:
+                        print("[Cmd] Usage: takeoff [alt_m]")
                 elif line == "estop":
                     self._handle_stdin_estop()
 
@@ -307,13 +324,7 @@ class OperatorInputController:
                     self._print_unknown(line)
             except Exception as exc:
                 print(f"[Cmd] error handling {line!r}: {exc}")
-                try:
-                    from utils.flight_log import get_flight_log
-                    get_flight_log().event(
-                        "ssh_command_error", line=line, error=str(exc),
-                    )
-                except Exception:
-                    pass
+                safe_event("ssh_command_error", line=line, error=str(exc))
 
     def _handle_safety_mode(self, label: str, cb: Optional[Callable[[], dict]]) -> None:
         if cb is None:
@@ -354,6 +365,33 @@ class OperatorInputController:
             print(f"[Cmd] {label}" + (f" — {msg}" if msg else ""))
         else:
             print(f"[Cmd] {verb} refused: {msg or 'unknown error'}")
+
+    def _handle_stdin_takeoff(self, alt: Optional[float]) -> None:
+        """Stdin wrapper around the handle_takeoff callback.
+
+        alt=None means use the configured default. The underlying
+        handler emits its own flight-log event; we only render an
+        operator-friendly summary here.
+        """
+        cb = self._handle_takeoff
+        if cb is None:
+            print("[Cmd] takeoff unavailable — handler not wired "
+                  "(launched without --drone?)")
+            return
+        try:
+            result = cb(alt) or {}
+        except Exception as exc:
+            print(f"[Cmd] takeoff error: {exc}")
+            return
+        status = result.get("status", "error")
+        msg    = result.get("msg", "")
+        target = result.get("altitude_m")
+        if status == "ok":
+            tail = f" → {target:.1f} m" if isinstance(target, (int, float)) else ""
+            print(f"[Cmd] TAKEOFF commanded{tail}"
+                  + (f" — {msg}" if msg else ""))
+        else:
+            print(f"[Cmd] takeoff refused: {msg or 'unknown error'}")
 
     def _handle_stdin_estop(self) -> None:
         """Software E-STOP for the SSH operator.
@@ -492,11 +530,7 @@ class OperatorInputController:
     def _print_unknown(self, line: str) -> None:
         """Print an 'unknown command' hint and log it to the flight log."""
         print(f"[Cmd] unknown: {line!r} — type 'help' for the list")
-        try:
-            from utils.flight_log import get_flight_log
-            get_flight_log().event("ssh_unknown_command", line=line)
-        except Exception:
-            pass
+        safe_event("ssh_unknown_command", line=line)
 
     # ------------------------------------------------------------------
     #  Shared action helpers

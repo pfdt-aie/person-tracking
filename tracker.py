@@ -52,6 +52,7 @@ from tracking.target_detection import TargetDetection
 from tracking.target_selector import TargetSelector
 from tracking.tracker_state import TrackerState
 from tracking.velocity_tracker import VelocityTracker
+from utils.flight_log import safe_event
 from utils.frame_grabber import FrameGrabber
 from utils.video_recorder import VideoRecorder
 
@@ -214,6 +215,7 @@ class PersonGimbalTracker:
             lissajous    = self.lissajous,
             handle_estop     = self._handle_estop,
             handle_arm       = self._handle_arm,
+            handle_takeoff   = self._handle_takeoff,
             handle_preflight = self._handle_preflight,
             handle_telemetry = self._handle_telemetry,
         )
@@ -346,9 +348,7 @@ class PersonGimbalTracker:
         so the gimbal stops chasing even if the FCU is unreachable.
         Returns a dict echoed back to the browser.
         """
-        from utils.flight_log import get_flight_log
-        get_flight_log().event("estop", action=action,
-                               drone_enabled=self._drone_enabled)
+        safe_event("estop", action=action, drone_enabled=self._drone_enabled)
         try:
             self._ts.tracking_enabled = False
             # B2: emit the disarm event from here when E-STOP is what
@@ -357,9 +357,7 @@ class PersonGimbalTracker:
             # transition (see _handle_arm idempotency below).
             if self._ts.drone_armed:
                 self._ts.drone_armed = False
-                get_flight_log().event(
-                    "disarm", reason="estop", action=action,
-                )
+                safe_event("disarm", reason="estop", action=action)
             self.drone_ctrl.reset()
             # B3: stop manual gimbal motion. Without this an operator
             # mid-'pan 50' in MANUAL mode would keep panning after the
@@ -464,8 +462,7 @@ class PersonGimbalTracker:
             self._ts.drone_armed = False
             if was_armed:
                 print("[Arm] Drone-body tracker DISARMED by operator")
-                from utils.flight_log import get_flight_log
-                get_flight_log().event("disarm", source="operator")
+                safe_event("disarm", source="operator")
                 return {"armed": False, "status": "ok", "msg": "disarmed"}
             return {"armed": False, "status": "ok", "msg": "already disarmed"}
 
@@ -485,10 +482,88 @@ class PersonGimbalTracker:
         self.mav.clear_rc_override()
         self._ts.drone_armed = True
         print("[Arm] Drone-body tracker ARMED — preflight all green")
-        from utils.flight_log import get_flight_log
-        get_flight_log().event("arm", checks_passed=len(items))
+        safe_event("arm", checks_passed=len(items))
         return {"armed": True, "status": "ok", "msg": "armed",
                 "items": [c.to_dict() for c in items]}
+
+    def _handle_takeoff(self, altitude_m: Optional[float] = None) -> dict:
+        """Command the FCU to take off to ``altitude_m`` AGL.
+
+        Args:
+            altitude_m: Target altitude in metres AGL, or None to use
+                ``cfg.DEFAULT_TAKEOFF_ALT_M`` (7.0 m).
+
+        Returns:
+            ``{"status": "ok"|"error", "msg": str, "altitude_m": float,
+            "items": [...]}``. ``items`` is included on preflight
+            failure to mirror ``_handle_arm``.
+
+        Refuses unless ``--drone`` was passed, preflight passes, and
+        the FCU reports LANDED. Same preflight gate as ``_handle_arm``
+        — covers MAVLink link, ARMED, GUIDED, HOME, GPS, sensors,
+        battery, RC link, params, and fence. (Preflight intentionally
+        skips ARMED/GUIDED in ``--ground-test`` so bench rehearsal
+        works.) If the FCU is not in GUIDED, switches to GUIDED first
+        and gives the heartbeat a moment to refresh the local mode
+        cache before preflight runs.
+
+        Altitudes below ``MIN_ALT_M`` are accepted for hover testing
+        but the response includes a warning, since the follow
+        controller's SAFETY-CRITICAL floor will climb the drone up to
+        ``MIN_ALT_M`` once the tracker is armed.
+        """
+        alt = float(altitude_m) if altitude_m is not None else cfg.DEFAULT_TAKEOFF_ALT_M
+
+        if not (cfg.MIN_TAKEOFF_ALT_M <= alt <= cfg.MAX_TAKEOFF_ALT_M):
+            return {"status": "error", "altitude_m": alt,
+                    "msg": f"altitude {alt:.1f} m outside "
+                           f"[{cfg.MIN_TAKEOFF_ALT_M}, {cfg.MAX_TAKEOFF_ALT_M}] m"}
+
+        if not self._drone_enabled:
+            return {"status": "error", "altitude_m": alt,
+                    "msg": "tracker launched without --drone"}
+
+        # Auto-switch to GUIDED BEFORE preflight, since preflight gates
+        # on the cached FCU mode. Trust the ACK; sleep briefly to give
+        # the heartbeat rx_loop a chance to refresh `_mode` before
+        # preflight reads it. No-op when already in GUIDED.
+        if self.mav.get_mode() != "GUIDED":
+            print(f"[Takeoff] FCU mode is {self.mav.get_mode()} — switching to GUIDED")
+            if not self.mav.set_mode_guided():
+                return {"status": "error", "altitude_m": alt,
+                        "msg": "failed to set GUIDED mode"}
+            time.sleep(0.5)   # let heartbeat refresh the local mode cache
+
+        items = self.preflight.run()
+        if not all(c.ok for c in items):
+            failing = ", ".join(c.name for c in items if not c.ok)
+            return {"status": "error", "altitude_m": alt,
+                    "msg": f"preflight failing: {failing}",
+                    "items": [c.to_dict() for c in items]}
+
+        # Takeoff-specific gate: must be on the ground. Not part of
+        # preflight because in-flight `arm` is legitimate.
+        if not self.mav.is_landed():
+            return {"status": "error", "altitude_m": alt,
+                    "msg": "FCU does not report landed — refusing takeoff in flight"}
+
+        print(f"[Takeoff] Commanding takeoff to {alt:.1f} m AGL")
+        if not self.mav.send_takeoff(alt):
+            return {"status": "error", "altitude_m": alt,
+                    "msg": "FCU did not ACK NAV_TAKEOFF"}
+
+        safe_event("takeoff", altitude_m=alt)
+
+        # Soft warning: alt below the follow controller's hard floor
+        # will trigger an immediate climb to MIN_ALT_M on tracker arm.
+        warn = ""
+        if alt < cfg.MIN_ALT_M:
+            warn = (f" — WARNING: {alt:.1f} m is below MIN_ALT_M "
+                    f"({cfg.MIN_ALT_M} m); arming the tracker will "
+                    f"climb to the floor")
+            print(f"[Takeoff]{warn}")
+        return {"status": "ok", "altitude_m": alt,
+                "msg": f"takeoff to {alt:.1f} m commanded{warn}"}
 
     # ------------------------------------------------------------------
     #  Live telemetry (S3.1)
@@ -606,6 +681,7 @@ class PersonGimbalTracker:
             self.stream.set_estop_callback(self._handle_estop)
             self.stream.set_preflight_callback(self._handle_preflight)
             self.stream.set_arm_callback(self._handle_arm)
+            self.stream.set_takeoff_callback(self._handle_takeoff)
             self.stream.set_telemetry_callback(self._handle_telemetry)
         self._stream_thread = threading.Thread(
             target=self._stream_loop, daemon=True, name="StreamThread")

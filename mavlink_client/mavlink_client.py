@@ -36,6 +36,7 @@ from typing import Optional
 import config as cfg
 from config.settings import Settings, load_settings
 from safety import SafetyMonitor
+from utils.flight_log import safe_event
 
 try:
     from pymavlink import mavutil
@@ -263,28 +264,15 @@ class MAVLinkClient:
                         new_mode = mavutil.mode_string_v10(msg)
                         if new_mode != self._mode and self._mode not in ("UNKNOWN", ""):
                             print(f"[MAVLink] Flight mode: {self._mode} → {new_mode}")
-                            try:
-                                from utils.flight_log import get_flight_log
-                                get_flight_log().event(
-                                    "mode_change",
-                                    prev=self._mode, new=new_mode,
-                                )
-                            except Exception:
-                                pass
+                            safe_event("mode_change", prev=self._mode, new=new_mode)
                             if self._mode == "GUIDED" and new_mode != "GUIDED":
                                 print("[MAVLink] ⚠ Left GUIDED mode — "
                                       "operator override or failsafe")
                                 # S3.6 — latch RC override. Tracker must
                                 # re-arm explicitly to clear.
                                 self._rc_override_latched = True
-                                try:
-                                    from utils.flight_log import get_flight_log
-                                    get_flight_log().event(
-                                        "rc_override", prev_mode=self._mode,
-                                        new_mode=new_mode,
-                                    )
-                                except Exception:
-                                    pass
+                                safe_event("rc_override", prev_mode=self._mode,
+                                           new_mode=new_mode)
                         self._mode = new_mode
 
                     elif t == "ATTITUDE":
@@ -797,8 +785,22 @@ class MAVLinkClient:
                 self._ack_events.pop(command, None)
         return False
 
-    def set_mode_guided(self) -> bool:
-        """Switch to GUIDED mode (ACK-confirmed).
+    # ArduCopter custom-mode numbers used with MAV_CMD_DO_SET_MODE.
+    _MODE_NUMBERS = {
+        "GUIDED": 4,
+        "LOITER": 5,
+        "RTL":    6,
+        "LAND":   9,
+        "BRAKE": 17,
+    }
+
+    def _set_mode(self, label: str, suffix: str = "") -> bool:
+        """Switch to an ArduCopter flight mode (ACK-confirmed).
+
+        Args:
+            label:  One of ``_MODE_NUMBERS``.
+            suffix: Optional trailing tag printed on success
+                    (e.g. ``"E-STOP stage 1"``).
 
         Returns:
             True if autopilot accepted the command.
@@ -806,12 +808,36 @@ class MAVLinkClient:
         ok = self.send_command_with_ack(
             mavutil.mavlink.MAV_CMD_DO_SET_MODE,
             p1=mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
-            p2=4,   # ArduCopter GUIDED mode number
+            p2=self._MODE_NUMBERS[label],
         )
         if ok:
-            print("[MAVLink] GUIDED mode confirmed")
+            tail = f" ({suffix})" if suffix else ""
+            print(f"[MAVLink] {label} mode confirmed{tail}")
         else:
-            print("[MAVLink] WARNING: GUIDED mode not confirmed by autopilot")
+            print(f"[MAVLink] WARNING: {label} mode not confirmed by autopilot")
+        return ok
+
+    def set_mode_guided(self) -> bool:
+        """Switch to GUIDED mode (ACK-confirmed)."""
+        return self._set_mode("GUIDED")
+
+    def send_takeoff(self, altitude_m: float) -> bool:
+        """Issue MAV_CMD_NAV_TAKEOFF — ascend to altitude_m AGL.
+
+        Preconditions are the caller's responsibility — ArduCopter will
+        reject the command unless the FCU is ARMED and in GUIDED. In
+        --ground-test mode the command is logged but not transmitted,
+        and this returns True so callers proceed identically.
+        """
+        ok = self.send_command_with_ack(
+            mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+            p7=float(altitude_m),
+        )
+        if ok:
+            print(f"[MAVLink] TAKEOFF confirmed (alt={altitude_m:.1f} m AGL)")
+        else:
+            print(f"[MAVLink] WARNING: TAKEOFF not confirmed by autopilot "
+                  f"(alt={altitude_m:.1f} m)")
         return ok
 
     # ------------------------------------------------------------------
@@ -950,71 +976,33 @@ class MAVLinkClient:
 
         Safe failsafe action when tracking is lost — removes tracker from
         control loop and lets ArduPilot hold position independently.
-        Uses MAV_CMD_DO_SET_MODE (mode=5) — same pattern as set_mode_guided().
         """
-        ok = self.send_command_with_ack(
-            mavutil.mavlink.MAV_CMD_DO_SET_MODE,
-            p1=mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
-            p2=5,   # ArduCopter LOITER mode number
-        )
-        if ok:
-            print("[MAVLink] LOITER mode confirmed")
-        else:
-            print("[MAVLink] WARNING: LOITER mode not confirmed by autopilot")
-        return ok
+        return self._set_mode("LOITER")
 
     def send_rtl(self) -> bool:
         """Switch to RTL flight mode (ACK-confirmed).
 
         Used for battery-critical failsafe ONLY.
         Do NOT call this on tracking loss — use send_loiter() instead.
-        Uses MAV_CMD_DO_SET_MODE (mode=6) — same pattern as set_mode_guided().
         """
-        ok = self.send_command_with_ack(
-            mavutil.mavlink.MAV_CMD_DO_SET_MODE,
-            p1=mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
-            p2=6,   # ArduCopter RTL mode number
-        )
-        if ok:
-            print("[MAVLink] RTL mode confirmed")
-        else:
-            print("[MAVLink] WARNING: RTL mode not confirmed by autopilot")
-        return ok
+        return self._set_mode("RTL")
 
     def send_brake(self) -> bool:
-        """Switch to BRAKE flight mode (ArduCopter mode 17, ACK-confirmed).
+        """Switch to BRAKE flight mode (ACK-confirmed).
 
         BRAKE is the aggressive-stop mode used as the first stage of the
         software E-STOP (S1.1). Drone decelerates to a hover; no further
         operator action required for steady state.
         """
-        ok = self.send_command_with_ack(
-            mavutil.mavlink.MAV_CMD_DO_SET_MODE,
-            p1=mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
-            p2=17,   # ArduCopter BRAKE mode number
-        )
-        if ok:
-            print("[MAVLink] BRAKE mode confirmed (E-STOP stage 1)")
-        else:
-            print("[MAVLink] WARNING: BRAKE mode not confirmed by autopilot")
-        return ok
+        return self._set_mode("BRAKE", "E-STOP stage 1")
 
     def send_land(self) -> bool:
-        """Switch to LAND flight mode (ArduCopter mode 9, ACK-confirmed).
+        """Switch to LAND flight mode (ACK-confirmed).
 
         Second stage of the software E-STOP (S1.1) — used when the operator
         double-taps the E-STOP button or BRAKE fails to ACK.
         """
-        ok = self.send_command_with_ack(
-            mavutil.mavlink.MAV_CMD_DO_SET_MODE,
-            p1=mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
-            p2=9,   # ArduCopter LAND mode number
-        )
-        if ok:
-            print("[MAVLink] LAND mode confirmed (E-STOP stage 2)")
-        else:
-            print("[MAVLink] WARNING: LAND mode not confirmed by autopilot")
-        return ok
+        return self._set_mode("LAND", "E-STOP stage 2")
 
     def send_disarm_if_landed(self) -> bool:
         """Disarm the FCU only after landed-state says it is on the ground."""
