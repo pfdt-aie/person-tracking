@@ -4,10 +4,12 @@ Jetson CUDA Diagnostic Script
 Checks CUDA installation and PyTorch GPU support
 """
 
-import sys
 import os
+import pathlib
 import subprocess
+import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 import config as cfg
 
 

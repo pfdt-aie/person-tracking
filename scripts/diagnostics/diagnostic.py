@@ -4,11 +4,13 @@ System Diagnostic Script
 Verifies all components before running tracking system
 """
 
-import sys
 import os
+import pathlib
 import socket
 import struct
+import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 import config as cfg
 
 

@@ -4,12 +4,15 @@ YOLO11 GPU-Optimized Detection for Jetson Nano Super
 Forces GPU usage and optimizes for CUDA acceleration
 """
 
-import cv2
-import time
-import numpy as np
-import sys
 import os
+import pathlib
+import sys
+import time
 
+import cv2
+import numpy as np
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 import config as cfg
 
 

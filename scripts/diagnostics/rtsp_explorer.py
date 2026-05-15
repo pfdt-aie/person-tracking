@@ -4,9 +4,13 @@ SIYI ZR30 RTSP Stream Explorer
 Finds and tests all available RTSP streams
 """
 
-import cv2
+import pathlib
+import sys
 import time
 
+import cv2
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 import config as cfg
 
 

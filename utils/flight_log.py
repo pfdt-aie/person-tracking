@@ -147,6 +147,20 @@ def get_flight_log() -> "FlightLog | _NullLog":
     return _active
 
 
+def safe_event(name: str, **fields: Any) -> None:
+    """Append an event line; never raise.
+
+    Thin wrapper around ``get_flight_log().event()`` for call sites in the
+    flight loop, RX threads, and error handlers where a logging failure
+    must not propagate. Tests monkeypatch ``utils.flight_log.get_flight_log``
+    so the lookup happens at call time, not import time.
+    """
+    try:
+        get_flight_log().event(name, **fields)
+    except Exception:
+        pass
+
+
 def close_flight_log() -> None:
     """Close the singleton log (used by main.py teardown)."""
     global _active

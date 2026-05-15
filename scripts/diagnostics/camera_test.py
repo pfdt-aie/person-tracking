@@ -1,7 +1,10 @@
+import pathlib
 import socket
-import time
 import struct
+import sys
+import time
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 import config as cfg
 
 # Config

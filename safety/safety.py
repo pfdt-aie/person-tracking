@@ -21,6 +21,7 @@ from dataclasses import dataclass
 
 import config as cfg
 from config.settings import Settings, load_settings
+from utils.flight_log import safe_event
 
 
 #  Geofence definition
@@ -325,8 +326,4 @@ class SafetyMonitor:
         """Print a safety violation to the terminal and emit a structured event."""
         ts = time.strftime("%H:%M:%S")
         print(f"[Safety] {ts} WARNING: {msg}")
-        try:
-            from utils.flight_log import get_flight_log
-            get_flight_log().event("safety_warning", message=msg)
-        except Exception:
-            pass
+        safe_event("safety_warning", message=msg)

@@ -4,12 +4,16 @@ YOLO11 Debug & Optimized Test Script
 Fixes: Resolution, FPS, Detection issues
 """
 
-import cv2
+import pathlib
+import sys
 import time
-import numpy as np
-from ultralytics import YOLO
-import torch
 
+import cv2
+import numpy as np
+import torch
+from ultralytics import YOLO
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 import config as cfg
 
 

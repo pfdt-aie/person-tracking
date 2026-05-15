@@ -4,10 +4,14 @@ Simple YOLO11 Detection Test (No Gimbal Tracking)
 For quick performance testing on Raspberry Pi 5
 """
 
-import cv2
+import pathlib
+import sys
 import time
+
+import cv2
 from ultralytics import YOLO
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 import config as cfg
 
 
