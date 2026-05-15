@@ -15,7 +15,9 @@ Endpoints:
 
 Tailscale setup (one-time):
     Jetson: sudo tailscale up; tailscale ip -4   (note the IP)
-    Browser: http://<tailscale-ip>:8080/
+    Browser: http://<tailscale-ip>:5000/
+             — or via Tailscale Serve: https://ai2-desktop.tailca9f5b.ts.net/
+               (proxies to 127.0.0.1:5000)
 """
 
 import json

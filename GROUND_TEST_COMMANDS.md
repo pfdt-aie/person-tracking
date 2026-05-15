@@ -30,7 +30,8 @@ python3 main.py --stream-host 0.0.0.0
 Open the web UI from your laptop/phone:
 
 ```text
-http://<jetson-ip>:8080/
+http://<jetson-ip>:5000/
+# or via Tailscale Serve: https://ai2-desktop.tailca9f5b.ts.net/
 ```
 
 ### Full pipeline ground test with FCU connected
@@ -54,7 +55,8 @@ movement, mode, RTL, BRAKE, or LAND commands.
 2. Open:
 
 ```text
-http://<jetson-ip>:8080/
+http://<jetson-ip>:5000/
+# or via Tailscale Serve: https://ai2-desktop.tailca9f5b.ts.net/
 ```
 
 3. Click on the person in the video.
@@ -219,13 +221,17 @@ velocity, and then send the requested FCU mode command.
 First E-STOP press:
 
 ```bash
-curl "http://<jetson-ip>:8080/estop"
+curl "http://<jetson-ip>:5000/estop"
+# or via Tailscale Serve:
+curl "https://ai2-desktop.tailca9f5b.ts.net/estop"
 ```
 
 Second press within 3 seconds for LAND:
 
 ```bash
-curl "http://<jetson-ip>:8080/estop"
+curl "http://<jetson-ip>:5000/estop"
+# or via Tailscale Serve:
+curl "https://ai2-desktop.tailca9f5b.ts.net/estop"
 ```
 
 Important: if the program was launched with `--ground-test`, E-STOP is tested
@@ -385,7 +391,8 @@ python3 main.py --drone --ground-test --stream-host 0.0.0.0
 2. Open:
 
 ```text
-http://<jetson-ip>:8080/
+http://<jetson-ip>:5000/
+# or via Tailscale Serve: https://ai2-desktop.tailca9f5b.ts.net/
 ```
 
 3. Stand in front of the camera.
@@ -412,8 +419,11 @@ track <new_id>
 7. Test E-STOP in dry-run:
 
 ```bash
-curl "http://<jetson-ip>:8080/estop"
-curl "http://<jetson-ip>:8080/estop"
+curl "http://<jetson-ip>:5000/estop"
+curl "http://<jetson-ip>:5000/estop"
+# or via Tailscale Serve:
+# curl "https://ai2-desktop.tailca9f5b.ts.net/estop"
+# curl "https://ai2-desktop.tailca9f5b.ts.net/estop"
 ```
 
 8. Test direct safety mode commands in dry-run:
@@ -432,25 +442,31 @@ q
 
 ## 12. Troubleshooting
 
-### Web UI not reachable (`http://<tailscale-ip>:8080/` shows "site can't be reached")
+### Web UI not reachable (`http://<tailscale-ip>:5000/` or Tailscale Serve URL shows "site can't be reached")
 
 On the Jetson, run these three commands to localize the failure:
 
 ```bash
-# (1) Is the tracker actually listening on 8080?
-ss -tlnp | grep 8080
+# (1) Is the tracker actually listening on 5000?
+ss -tlnp | grep 5000
 
 # (2) Does Tailscale agree on which IP is yours?
 tailscale ip -4
 
-# (3) Is anything firewalling 8080 locally?
-sudo iptables -L -n | grep 8080
+# (3) Is anything firewalling 5000 locally?
+sudo iptables -L -n | grep 5000
+
+# (4) Is Tailscale Serve configured to proxy → 127.0.0.1:5000?
+tailscale serve status
 ```
 
 Expected:
 
-- `(1)` shows `0.0.0.0:8080` (or `*:8080`). If it shows `127.0.0.1:8080`
-  the tracker is loopback-only — relaunch with `--stream-host 0.0.0.0`.
+- `(1)` shows `0.0.0.0:5000` (or `*:5000`). If it shows `127.0.0.1:5000`
+  the tracker is loopback-only — direct-IP access won't work but the
+  Tailscale Serve proxy at `https://ai2-desktop.tailca9f5b.ts.net/`
+  will still reach it. To restore direct LAN/Tailscale-IP access,
+  relaunch with `--stream-host 0.0.0.0`.
   (When token enforcement is re-enabled later, also pass
   `--stream-token <secret>`.)
 - `(2)` matches the IP you're typing in the browser URL.

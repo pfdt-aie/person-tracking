@@ -208,7 +208,7 @@ no static-IP dance.
         ├─────── tailnet (WireGuard) ─────────┤
         │                                     │
         ├── SSH :22 ────────────────────────► │
-        └── HTTP :8080  (MJPEG + Web UI) ───► │
+        └── HTTP :5000  (MJPEG + Web UI) ───► │
                                               │
                               Local Wi-Fi to camera (192.168.144.25)
                                               │
@@ -241,14 +241,16 @@ python3 main.py --drone \
     --stream-token MYSECRET
 
 # 3. From the same laptop (or any tailnet device) open the UI:
-#    http://100.a.b.c:8080/?token=MYSECRET
+#    http://100.a.b.c:5000/?token=MYSECRET
+#    — or, if Tailscale Serve is configured to proxy 127.0.0.1:5000:
+#    https://ai2-desktop.tailca9f5b.ts.net/?token=MYSECRET
 ```
 
 ### Why this setup
 
 | Concern | Mitigation |
 |:---|:---|
-| **No internet exposure** | Port 8080 is bound to all interfaces, but only tailnet peers can reach the Jetson — there's no public route to it |
+| **No internet exposure** | Port 5000 is bound to all interfaces, but only tailnet peers can reach the Jetson — there's no public route to it (unless Tailscale Funnel is explicitly enabled on the Serve URL) |
 | **Authentication** | `--stream-token` adds a second factor over the tailnet identity. Control endpoints reject mismatched tokens with HTTP 403 |
 | **E-STOP still reachable** | `/estop` intentionally bypasses the token — even with the wrong token in hand, the operator can still stop the drone |
 | **Multi-operator** | Anyone with tailnet ACL access and the token can open the UI from anywhere |
@@ -293,7 +295,8 @@ Three launch modes — all assume Tailscale is the operator transport:
 Then on the operator laptop:
 
 ```
-http://<jetson-tailscale-ip>:8080/?token=MYSECRET
+http://<jetson-tailscale-ip>:5000/?token=MYSECRET
+# or via Tailscale Serve: https://ai2-desktop.tailca9f5b.ts.net/?token=MYSECRET
 ```
 
 ---
@@ -307,7 +310,7 @@ http://<jetson-tailscale-ip>:8080/?token=MYSECRET
 3. Power on the **RC transmitter**. Mode switch on **LOITER** or **STABILIZE** (**NOT** GUIDED).
 4. SSH into the Jetson over Tailscale: `ssh ai-engineer@<jetson-tailscale-ip>`.
 5. Launch `main.py` with the Tailscale-ready flags (see §7).
-6. On the operator laptop / phone, open `http://<jetson-tailscale-ip>:8080/?token=MYSECRET`.
+6. On the operator laptop / phone, open `http://<jetson-tailscale-ip>:5000/?token=MYSECRET` — or, if Tailscale Serve is configured, `https://ai2-desktop.tailca9f5b.ts.net/?token=MYSECRET`.
 
 ### 8.2 Gimbal tracking (camera only)
 
