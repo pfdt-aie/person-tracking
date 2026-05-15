@@ -4,6 +4,7 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
+from config.settings import load_settings
 from control.drone_controller import DroneController
 from safety.safety import GeofenceCircle, SafetyMonitor
 from tracking.person_geolocation import PersonEKF
@@ -20,6 +21,7 @@ def _controller() -> DroneController:
         )
     )
     controller = DroneController.__new__(DroneController)
+    controller._s = load_settings()
     controller._safety = safety
     controller._ekf = PersonEKF()
     controller._origin_set = True

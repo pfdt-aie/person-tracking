@@ -62,6 +62,38 @@ class Settings:
     drone_kp:         float = _cfg.DRONE_KP
     drone_kp_yaw:     float = _cfg.DRONE_KP_YAW
     drone_cmd_rate_hz: int  = _cfg.DRONE_CMD_RATE_HZ
+    drone_follow_deadband_m: float = _cfg.DRONE_FOLLOW_DEADBAND_M
+    drone_max_yaw_rate_deg:  float = _cfg.DRONE_MAX_YAW_RATE_DEG
+    vel_ema_alpha:           float = _cfg.VEL_EMA_ALPHA
+    max_jerk_ms3:            float = _cfg.MAX_JERK_MS3
+    max_accel_ms2:           float = _cfg.MAX_ACCEL_MS2
+
+    # --- Following / hybrid gimbal-drone ---
+    gimbal_pan_soft_deg:    float = _cfg.GIMBAL_PAN_SOFT_DEG
+    gimbal_pan_hard_deg:    float = _cfg.GIMBAL_PAN_HARD_DEG
+    gimbal_tilt_default_deg: float = _cfg.GIMBAL_TILT_DEFAULT_DEG
+    retreat_speed_ms:       float = _cfg.RETREAT_SPEED_MS
+    retreat_hysteresis_m:   float = _cfg.RETREAT_HYSTERESIS_M
+    min_vertical_sep_m:     float = _cfg.MIN_VERTICAL_SEP_M
+    bearing_latch_s:        float = _cfg.BEARING_LATCH_S
+    bearing_slew_deg_s:     float = _cfg.BEARING_SLEW_DEG_S
+
+    # --- Tracking-loss failsafes ---
+    body_move_confirm_frames: int = _cfg.BODY_MOVE_CONFIRM_FRAMES
+    tracking_loss_hover_s:  float = _cfg.TRACKING_LOSS_HOVER_S
+    tracking_loss_loiter_s: float = _cfg.TRACKING_LOSS_LOITER_S
+    tracking_loss_alert_s:  float = _cfg.TRACKING_LOSS_ALERT_S
+    min_tracking_fps:       float = _cfg.MIN_TRACKING_FPS
+    fps_window_size:        int   = _cfg.FPS_WINDOW_SIZE
+    max_flight_time_s:      float = _cfg.MAX_FLIGHT_TIME_S
+    loiter_confirm_timeout_s: float = _cfg.LOITER_CONFIRM_TIMEOUT_S
+    mode_warn_interval_s:   float = _cfg.MODE_WARN_INTERVAL_S
+
+    # --- Geofence return / RTL retry ---
+    geofence_return_max_ms: float = _cfg.GEOFENCE_RETURN_MAX_MS
+    geofence_return_kp:     float = _cfg.GEOFENCE_RETURN_KP
+    rtl_max_attempts:       int   = _cfg.RTL_MAX_ATTEMPTS
+    rtl_retry_interval_s:   float = _cfg.RTL_RETRY_INTERVAL_S
 
     # --- Safety ---
     heartbeat_watchdog_s:   float = _cfg.HEARTBEAT_WATCHDOG_S

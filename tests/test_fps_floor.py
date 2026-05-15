@@ -8,11 +8,13 @@ from collections import deque
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 import config as cfg
+from config.settings import load_settings
 from control.drone_controller import DroneController
 
 
 def _controller() -> DroneController:
     c = DroneController.__new__(DroneController)
+    c._s = load_settings()
     c._fps_times = deque(maxlen=cfg.FPS_WINDOW_SIZE)
     c._lock = threading.Lock()
     c._last_detection = 0.0

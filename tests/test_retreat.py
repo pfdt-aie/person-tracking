@@ -6,6 +6,7 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 import config as cfg
+from config.settings import load_settings
 from control.drone_controller import DroneController
 
 
@@ -23,6 +24,7 @@ class _FakeMav:
 def _controller() -> tuple[DroneController, _FakeMav]:
     mav = _FakeMav()
     c = DroneController.__new__(DroneController)
+    c._s = load_settings()
     c._mav = mav
     c._retreating = False
     return c, mav
