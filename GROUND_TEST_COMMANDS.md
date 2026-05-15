@@ -16,6 +16,126 @@ If `python main.py` works on your Jetson, you can use `python`. If not, use
 > `--stream-token <secret>` back in the launches and `?token=<secret>`
 > back in the URLs.
 
+## 0. Gated Bench → Ground → Flight Progression
+
+Do not jump straight to a flight launch command. Walk through the gates
+below in order. Each gate has a pass criterion — if it fails, stop and
+fix before moving to the next gate. This sequence exists because going
+from "deps not installed / no video feed" to "real outdoor flight" in
+one step has caused problems before.
+
+Two caveats up front:
+
+1. **Confirm the safety plan status.** Memory references
+   `SAFETY_IMPLEMENTATION_PLAN_2026-05-12.md` (20 gaps to close before a
+   real-person ground test). That file may not be in the current
+   checkout — check other branches / local notes / commit history
+   before treating any of those gaps as closed.
+2. **The RC pilot is the primary control.** The Jetson is auxiliary.
+   Always have a manual-override mode (e.g. STABILIZE / LOITER) mapped
+   to an RC switch you can hit instantly.
+
+### Gate 0 — install deps in the venv on the Jetson
+
+```bash
+source /home/ai2/ai/bin/activate
+cd /home/ai2/person-tracking
+git pull origin akash                       # pull preflight commit
+pip install -r requirements.txt
+python3 -c "import pymavlink, cv2, ultralytics; print('deps OK')"
+```
+
+**Pass criterion:** prints `deps OK`. If the preflight check fires on
+launch, fix and re-run. Auto-install at runtime is intentionally
+disabled — see [`utils/preflight.py`](utils/preflight.py).
+
+### Gate 1 — camera + gimbal only (no FCU, no propellers needed)
+
+```bash
+python3 main.py --stream-host 0.0.0.0
+```
+
+Open `http://<jetson-ip>:5000/` from a laptop. Confirm: live video,
+person detection boxes, gimbal moves when you `track <id>` from the
+stdin loop.
+
+**Pass criterion:** stable video feed for ≥2 minutes, gimbal tracking
+works, no errors in the log. **If RTSP still fails here, do not
+proceed** — the flight code depends on this stream.
+
+### Gate 2 — FCU bench test, **PROPS OFF**, ground-test mode (no MAVLink TX)
+
+Physically remove propellers. Connect Orange Cube+ over USB. Then:
+
+```bash
+python3 main.py --drone --ground-test --stream-host 0.0.0.0
+```
+
+From the stdin loop:
+
+```text
+preflight
+status
+ids
+```
+
+**Pass criterion:** `preflight` passes all checks (GPS lock, RC link,
+battery, EKF, modes). `status` shows live telemetry. No
+`[MAVLink] WARNING` lines. **Do not skip this gate** — `--ground-test`
+is the only mode that lets you exercise the telemetry path without
+risk of an unintended command being transmitted.
+
+### Gate 3 — FCU bench test, **PROPS STILL OFF**, no ground-test flag (TX enabled, dry run)
+
+```bash
+python3 main.py --drone --stream-host 0.0.0.0
+```
+
+From stdin:
+
+```text
+preflight
+mode auto
+arm
+disarm
+```
+
+**Pass criterion:** mode change confirmed by FCU, motors spin briefly
+on arm, clean disarm. **Do not run `takeoff` here** — even with props
+off, a takeoff command tells the FCU to climb and can confuse it on
+the bench. If anything is unexpected, stop and investigate.
+
+### Gate 4 — outdoor flight checklist (before any flight launch command)
+
+- [ ] All gates 0–3 passed in this session, on this Jetson, with this build.
+- [ ] Props re-installed, torque-checked, rotation direction verified.
+- [ ] Open area, clear of people. RTL altitude configured and previously tested.
+- [ ] RC transmitter is the **primary** control; the Jetson is auxiliary. Manual-override mode (STABILIZE / LOITER) on an instant-access switch.
+- [ ] GCS (Mission Planner / QGC) connected separately for telemetry monitoring.
+- [ ] Battery fresh, voltage logged.
+- [ ] Safety plan items reviewed (see caveat at top of section).
+
+### Gate 4 — launch command (only after the checklist above)
+
+```bash
+python3 main.py --drone --stream-host 0.0.0.0
+```
+
+From stdin, once `preflight` passes outdoors with GPS lock:
+
+```text
+preflight
+arm
+takeoff 5
+```
+
+`takeoff 5` = 5 m AGL — start low. AltFloor is 10 m for tracking, but
+a 5 m hover-test is the right first flight to verify the takeoff path
+before letting the tracker drive altitude.
+
+If anything looks off: hit the RC manual-override switch first, then
+`estop` from stdin (or the web UI / `curl /estop`) second.
+
 ## 1. Safe Launch Options
 
 ### Camera and gimbal only
