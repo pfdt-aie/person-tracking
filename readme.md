@@ -401,15 +401,18 @@ python3 main.py [--drone] [--ground-test] [--cells N]
 ### 10.3 Terminal (headless / SSH)
 
 ```
-track <id>    Lock to persistent person ID
-unlock        Release lock
-ids           Print currently detected IDs
-mode auto     Automatic tracking mode
-mode manual   Manual gimbal mode; stops body-following
-mode brake    Stop body-following and send BRAKE
-mode land     Stop body-following and send LAND
-mode rtl      Stop body-following and send RTL / return-to-home
-q             Quit
+track <id>      Lock to persistent person ID
+unlock          Release lock
+ids             Print currently detected IDs
+mode auto       Automatic tracking mode
+mode manual     Manual gimbal mode; stops body-following
+mode brake      Stop body-following and send BRAKE
+mode land       Stop body-following and send LAND
+mode rtl        Stop body-following and send RTL / return-to-home
+arm / disarm    Arm or disarm the drone-body tracker (preflight gated)
+takeoff [alt]   Command FCU takeoff to alt m AGL (default 7); preflight + armed + landed gated
+estop           BRAKE; press again within 3 s for LAND
+q               Quit
 ```
 
 ---
@@ -431,6 +434,7 @@ q             Quit
 | `/gimbal?dir=up\|down\|left\|right\|stop` | token | Manual gimbal nudge (MANUAL only) |
 | `/zoom_in` / `/zoom_out` | token | Gimbal zoom |
 | `/arm_tracker?on=true\|false` | token | Arm or stop drone-body following |
+| `/takeoff?alt=N` | token | Command FCU takeoff to N m AGL (default `DEFAULT_TAKEOFF_ALT_M = 7`). Refuses unless preflight all-green, FCU armed, and FCU landed. Auto-switches to GUIDED |
 | `/estop` | **always** | 1st press → BRAKE · 2nd press within 3 s → LAND |
 
 </div>
@@ -579,7 +583,7 @@ FENCE_ALT_MIN = 10
 
 </div>
 
-JSONL events emitted: `arm`, `disarm`, `estop`, `mode_change`, `rc_override`,
+JSONL events emitted: `arm`, `disarm`, `takeoff`, `estop`, `mode_change`, `rc_override`,
 `session_rtl`, `fps_floor`, `safety_warning`, `log_open`.
 
 ---

@@ -36,7 +36,7 @@ from config.settings import Settings, load_settings
 # /estop is intentionally NOT in this set: it must always be reachable
 # regardless of token state. Life safety overrides auth.
 _CONTROL_PATHS = {'/click', '/unlock', '/mode', '/gimbal',
-                  '/zoom_in', '/zoom_out', '/arm_tracker'}
+                  '/zoom_in', '/zoom_out', '/arm_tracker', '/takeoff'}
 
 # Double-tap window for E-STOP → LAND escalation (seconds)
 _ESTOP_DOUBLE_TAP_S = 3.0
@@ -86,6 +86,7 @@ class StreamServer:
         self._estop_last_action = ""
         self._preflight_cb = None   # callable() → list[dict] (per safety.PreflightCheck)
         self._arm_cb       = None   # callable(on: bool) → dict
+        self._takeoff_cb   = None   # callable(alt_m: Optional[float]) → dict
         self._telemetry_cb = None   # callable() → dict (S3.1)
 
     # ------------------------------------------------------------------
@@ -171,6 +172,16 @@ class StreamServer:
                 set on=True unless all preflight items pass.
         """
         self._arm_cb = cb
+
+    def set_takeoff_callback(self, cb) -> None:
+        """Wire the takeoff handler used by /takeoff?alt=N.
+
+        Args:
+            cb: callable(altitude_m: Optional[float]) → dict. None means
+                use the configured default altitude. Implementation must
+                enforce preflight + FCU-armed + landed gates.
+        """
+        self._takeoff_cb = cb
 
     def set_telemetry_callback(self, cb) -> None:
         """Wire the live-telemetry provider (S3.1).
@@ -807,6 +818,22 @@ async function runStream() {{
                     cb = server_ref._arm_cb
                     data = cb(on) if cb else {'status': 'error', 'msg': 'not wired'}
                     self._json(data)
+                elif route == '/takeoff':
+                    kv = urllib.parse.parse_qs(qs, keep_blank_values=False)
+                    alt_raw = kv.get('alt', [None])[0]
+                    if alt_raw is None:
+                        alt = None
+                    else:
+                        try:
+                            alt = float(alt_raw)
+                        except ValueError:
+                            self._json({'status': 'error',
+                                        'msg': f'invalid alt={alt_raw!r}'}, 400)
+                            return
+                    cb = server_ref._takeoff_cb
+                    data = cb(alt) if cb else {'status': 'error', 'msg': 'not wired'}
+                    code = 400 if isinstance(data, dict) and data.get('status') == 'error' else 200
+                    self._json(data, code)
                 else:
                     self.send_response(404)
                     self.end_headers()

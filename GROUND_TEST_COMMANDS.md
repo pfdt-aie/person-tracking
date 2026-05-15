@@ -280,6 +280,7 @@ mode auto|manual       set tracker mode
 mode brake|land|rtl    request FCU safety mode (--drone required)
 arm                    arm drone-body tracker after preflight (--drone)
 disarm                 stop following (tracker only; FCU mode unchanged)
+takeoff [alt]          command FCU takeoff to alt m AGL (default 7) — --drone, FCU armed + landed
 estop                  BRAKE; press again within 3s for LAND
 pan <-100..100>        manual gimbal pan speed (MANUAL mode)
 tilt <-100..100>       manual gimbal tilt speed (MANUAL mode)
@@ -297,8 +298,12 @@ Notes:
 
 - Unknown commands are answered with `[Cmd] unknown: ... — type 'help'`
   and logged to the structured flight log under `ssh_unknown_command`.
-- `arm`, `disarm`, and `estop` print `[Cmd] ... unavailable` when the
-  tracker was launched without `--drone`. No MAVLink command is sent.
+- `arm`, `disarm`, `takeoff`, and `estop` print `[Cmd] ... unavailable`
+  when the tracker was launched without `--drone`. No MAVLink command is sent.
+- `takeoff` refuses unless preflight is all-green, the FCU is ARMED
+  (RC pilot's job), and the FCU reports LANDED. It auto-switches the
+  FCU to GUIDED if needed. Under `--ground-test` the NAV_TAKEOFF
+  command is logged but not transmitted.
 - `disarm` only stops drone-body following inside the tracker. To
   command the FCU itself, use `mode brake`, `mode land`, or `mode rtl`.
 - `estop` double-tap escalation is independent per channel: the SSH

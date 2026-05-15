@@ -202,6 +202,16 @@ BEARING_LATCH_S: float        = 1.0
 BEARING_SLEW_DEG_S: float     = 30.0
 MIN_ALT_M: float             = 10.0  # Absolute altitude floor (m AGL) — SAFETY-CRITICAL
 MAX_ALT_M: float             = 80.0  # Altitude ceiling (m AGL)
+
+# --- Operator takeoff command ---
+# Used by the `takeoff [alt]` terminal command and `/takeoff?alt=N` HTTP
+# endpoint. The handler refuses an altitude outside [MIN, MAX]; values
+# below MIN_ALT_M are allowed for hover testing but log a warning since
+# the follow controller's floor will push the drone up to MIN_ALT_M
+# the moment the tracker is armed.
+DEFAULT_TAKEOFF_ALT_M: float = 7.0   # Default ascent target for `takeoff` (m AGL)
+MIN_TAKEOFF_ALT_M: float     = 1.0   # Reject takeoff requests below this (m)
+MAX_TAKEOFF_ALT_M: float     = 30.0  # Reject takeoff requests above this (m) — well under MAX_ALT_M
 GEOFENCE_RADIUS_M: float     = 500.0 # Circular geofence radius around home (m)
 HOME_KEEPOUT_RADIUS_M: float = 12.0  # No-fly cylinder around HOME (operator stands here)
 
