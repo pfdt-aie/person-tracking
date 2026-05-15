@@ -4,10 +4,11 @@
 # Version bands are major.minor floors plus next-major ceilings — wide enough
 # to coexist with the Jetson PyTorch wheel but narrow enough that a breaking
 # upstream release cannot silently land.
-numpy>=1.24,<3
+numpy>=1.24,<2          # Jetson SciPy + Ultralytics stack is not NumPy-2-ready
 opencv-python>=4.8,<5
 ultralytics>=8.3,<9
 pymavlink>=2.4,<3
+pyserial>=3.5,<4        # pymavlink serial transport — transitive, declared so preflight catches it
 
 # Test tooling
 pytest>=7.4,<9  # preflight: skip
