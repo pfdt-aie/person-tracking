@@ -66,10 +66,16 @@ class SafetyMonitor:
     """
 
     def __init__(self, geofence: GeofenceCircle | None = None, settings: Settings | None = None) -> None:
-        _s = settings or load_settings()
-        self._fence   = geofence or GeofenceCircle()
+        self._s       = settings or load_settings()
+        # Build the default fence from Settings (not cfg) so CLI overrides
+        # to radius/altitude limits propagate. Explicit fence still wins.
+        self._fence   = geofence or GeofenceCircle(
+            radius_m  = self._s.geofence_radius_m,
+            alt_min_m = self._s.min_alt_m,
+            alt_max_m = self._s.max_alt_m,
+        )
         self._lock    = threading.Lock()
-        self._n_cells = _s.default_cells   # updated by mavlink_client on connect
+        self._n_cells = self._s.default_cells   # updated by mavlink_client on connect
         self._hb_warn_logged: bool = False  # latch so early-warn prints once per gap
 
     #  Initialisation
@@ -140,7 +146,7 @@ class SafetyMonitor:
             (vN, vE, vD) with horizontal magnitude <= MAX_TRACKING_SPEED_MS
             and vertical magnitude <= MAX_TRACKING_SPEED_MS / 2.
         """
-        max_h = cfg.MAX_TRACKING_SPEED_MS
+        max_h = self._s.max_tracking_speed_ms
         max_v = max_h / 2.0
 
         horiz = math.sqrt(vN**2 + vE**2)
@@ -244,10 +250,11 @@ class SafetyMonitor:
             True if safe (outside keep-out), False if inside.
         """
         dist = math.hypot(pN, pE)
-        if dist < cfg.HOME_KEEPOUT_RADIUS_M:
+        keepout = self._s.home_keepout_radius_m
+        if dist < keepout:
             self._log(
                 f"HOME keep-out breach: target {dist:.1f}m from HOME "
-                f"(min {cfg.HOME_KEEPOUT_RADIUS_M:.1f}m)"
+                f"(min {keepout:.1f}m)"
             )
             return False
         return True
@@ -266,15 +273,16 @@ class SafetyMonitor:
             True if heartbeat is fresh. False if stale (> HEARTBEAT_WATCHDOG_S).
         """
         age = time.monotonic() - last_heartbeat_t
-        if age <= cfg.HEARTBEAT_WARN_S:
+        watchdog = self._s.heartbeat_watchdog_s
+        if age <= self._s.heartbeat_warn_s:
             self._hb_warn_logged = False
-        elif age > cfg.HEARTBEAT_WATCHDOG_S:
+        elif age > watchdog:
             self._log(f"MAVLink heartbeat lost ({age:.1f}s stale)")
             return False
         elif not self._hb_warn_logged:
             self._log(f"MAVLink heartbeat late ({age:.1f}s) — watching")
             self._hb_warn_logged = True
-        return age <= cfg.HEARTBEAT_WATCHDOG_S
+        return age <= watchdog
 
 
     #  Rule 5: Battery critical
@@ -294,10 +302,11 @@ class SafetyMonitor:
         with self._lock:
             n = self._n_cells
         per_cell = voltage_v / n
-        if per_cell < (cfg.CELL_CRITICAL_MV / 1000.0):
+        crit_v = self._s.cell_critical_mv / 1000.0
+        if per_cell < crit_v:
             self._log(
                 f"Battery critical: {voltage_v:.2f}V "
-                f"({per_cell:.3f}V/cell < {cfg.CELL_CRITICAL_MV/1000:.3f}V)"
+                f"({per_cell:.3f}V/cell < {crit_v:.3f}V)"
             )
             return True
         return False

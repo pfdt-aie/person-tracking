@@ -64,9 +64,11 @@ class Settings:
     drone_cmd_rate_hz: int  = _cfg.DRONE_CMD_RATE_HZ
 
     # --- Safety ---
-    heartbeat_watchdog_s: float = _cfg.HEARTBEAT_WATCHDOG_S
-    cell_critical_mv:     int   = _cfg.CELL_CRITICAL_MV
-    default_cells:        int   = _cfg.DEFAULT_CELLS
+    heartbeat_watchdog_s:   float = _cfg.HEARTBEAT_WATCHDOG_S
+    heartbeat_warn_s:       float = _cfg.HEARTBEAT_WARN_S
+    cell_critical_mv:       int   = _cfg.CELL_CRITICAL_MV
+    default_cells:          int   = _cfg.DEFAULT_CELLS
+    home_keepout_radius_m:  float = _cfg.HOME_KEEPOUT_RADIUS_M
 
     # --- Ground-test (S1.2) ---
     # When True the MAVLinkClient logs every intended TX but never actually
