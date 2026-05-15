@@ -34,6 +34,12 @@ import pathlib
 import sys
 from datetime import datetime
 
+# Preflight: verify declared dependencies are installed in this interpreter
+# BEFORE importing any third-party package. Fails fast with a clear fix
+# command instead of a deep stack trace mid-startup.
+from utils.preflight import enforce_dependencies
+enforce_dependencies(pathlib.Path(__file__).resolve().parent / "requirements.txt")
+
 # Pin Ultralytics settings dir before any ultralytics import so it lands
 # in a predictable location regardless of systemd user or read-only home.
 _ul_dir = pathlib.Path("/tmp/ultralytics")
