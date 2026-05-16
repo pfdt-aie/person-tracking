@@ -762,6 +762,16 @@ class MAVLinkClient:
         Returns the value on success, None on timeout or transport error.
         Subsequent calls for the same name return the cached value
         immediately if the FCU has already published it.
+
+        Ground-test note: PARAM_REQUEST_READ is a read-only query that has
+        no effect on the vehicle (the FCU just sends back its current
+        value). Unlike command_long / SET_POSITION_TARGET, it does not
+        need to be suppressed in --ground-test, and suppressing it broke
+        param-based preflight on the bench — every check returned 'not
+        advertised by FCU' because the request never went out. The two
+        TX paths that actually command the vehicle (send_command_with_ack
+        and _send_position_target_local_ned) keep their --ground-test
+        guards.
         """
         if self._mav is None:
             return None
@@ -771,11 +781,6 @@ class MAVLinkClient:
                 return self._params[name]
             ev = self._param_events.setdefault(name, threading.Event())
             ev.clear()
-
-        if self._ground_test:
-            # No TX in dry-run mode — the FCU will never reply. Return whatever
-            # we have cached (None) and let the caller treat as "unknown".
-            return None
 
         try:
             self._mav.mav.param_request_read_send(

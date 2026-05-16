@@ -34,6 +34,9 @@ class _SpyMavlink:
             def request_data_stream_send(self, *args):
                 pass
 
+            def param_request_read_send(self, *args):
+                self._p.tx.append(("param_request_read", args))
+
         self.mav = _Inner(self)
 
 
@@ -116,3 +119,25 @@ def test_is_ground_test_flag_propagates():
     assert c.is_ground_test() is True
     c2, _ = _client(ground_test=False)
     assert c2.is_ground_test() is False
+
+
+def test_ground_test_DOES_emit_param_request_read():
+    """Regression — PARAM_REQUEST_READ is read-only (no effect on the
+    vehicle) and must NOT be suppressed in ground-test, otherwise the
+    bench operator can't verify ArduPilot params. Pre-fix, fetch_param()
+    short-circuited to None whenever ground_test was True, which broke
+    preflight on the bench (all 7 safety params reported 'not advertised
+    by FCU' in field log gimbal_track_2026-05-16_18-48-17).
+    """
+    c, spy = _client(ground_test=True)
+    # fetch_param will block waiting for PARAM_VALUE that the spy never
+    # delivers — use a tiny timeout so the test stays fast.
+    val = c.fetch_param("FENCE_ENABLE", timeout=0.05)
+    assert val is None, "no real reply was injected, so we expect None"
+    kinds = [t[0] for t in spy.tx]
+    assert "param_request_read" in kinds, (
+        f"PARAM_REQUEST_READ must still be emitted in ground-test; TX log: {spy.tx}"
+    )
+    # And the existing control-write suppression is unaffected.
+    assert "command_long" not in kinds
+    assert "pos_target" not in kinds
