@@ -268,16 +268,7 @@ class MAVLinkClient:
 
                 with self._lock:
                     if t == "HEARTBEAT":
-                        self._hb_time = time.monotonic()
-                        self._armed   = bool(
-                            msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
-                        )
-                        # C2: log mode transitions, but collapse runaway flapping
-                        # so a stuck RC switch can't produce 100+ lines of noise.
-                        new_mode = mavutil.mode_string_v10(msg)
-                        if new_mode != self._mode and self._mode not in ("UNKNOWN", ""):
-                            self._handle_mode_transition(self._mode, new_mode)
-                        self._mode = new_mode
+                        self._process_heartbeat(msg)
 
                     elif t == "ATTITUDE":
                         self._roll  = msg.roll
@@ -397,6 +388,51 @@ class MAVLinkClient:
             )
         except Exception:
             pass
+
+    # ------------------------------------------------------------------
+    #  HEARTBEAT handler (filtered to the autopilot component only)
+    # ------------------------------------------------------------------
+
+    def _process_heartbeat(self, msg) -> None:
+        """Process one HEARTBEAT message, filtering out peripheral sources.
+
+        Modern ArduPilot FCUs (CubeOrangePlus etc.) emit heartbeats from
+        multiple components: the autopilot (compid=MAV_COMP_ID_AUTOPILOT1=1,
+        autopilot=ARDUPILOTMEGA), the IO MCU (compid=0, autopilot=INVALID),
+        and sometimes other peripherals. Only the autopilot's heartbeat
+        carries valid mode/armed state. Pre-filter so peripheral heartbeats
+        don't:
+          (a) update _mode and produce phantom "mode flapping" at the
+              bench (field session 2026-05-16_18-59 was flapping between
+              STABILIZE and Mode(0x4) once per second);
+          (b) mask a real autopilot stall in the heartbeat watchdog
+              (an IOMCU can stay healthy while the autopilot is dead).
+        """
+        if msg.autopilot == mavutil.mavlink.MAV_AUTOPILOT_INVALID:
+            return
+        # On the very first autopilot heartbeat, adopt its compid as our
+        # target so downstream TX paths (SET_MODE, command_long, param
+        # fetch, position target) address the autopilot directly instead
+        # of whatever component wait_heartbeat() happened to capture.
+        src_comp = msg.get_srcComponent()
+        if self._mav.target_component != src_comp:
+            print(
+                f"[MAVLink] Adopting autopilot compid={src_comp} "
+                f"(wait_heartbeat had picked compid="
+                f"{self._mav.target_component}; peripheral component)"
+            )
+            self._mav.target_component = src_comp
+
+        self._hb_time = time.monotonic()
+        self._armed   = bool(
+            msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
+        )
+        # C2: log mode transitions, but collapse runaway flapping so a
+        # stuck RC switch can't produce 100+ lines of noise.
+        new_mode = mavutil.mode_string_v10(msg)
+        if new_mode != self._mode and self._mode not in ("UNKNOWN", ""):
+            self._handle_mode_transition(self._mode, new_mode)
+        self._mode = new_mode
 
     # ------------------------------------------------------------------
     #  Mode transition handler (with flap collapsing)
