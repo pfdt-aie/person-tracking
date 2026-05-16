@@ -834,6 +834,54 @@ class MAVLinkClient:
         with self._param_lock:
             return self._params.get(name)
 
+    def prefetch_params(self, names: list[str], timeout_s: float = 5.0) -> dict[str, Optional[float]]:
+        """Fire PARAM_REQUEST_READ for every name in parallel, then wait
+        collectively for the PARAM_VALUE replies.
+
+        Sequential ``fetch_param`` calls each pay a per-request round-trip
+        on a cold autopilot — first few would time out at 2 s while the
+        FCU's param thread warmed up (field session 2026-05-16_19-18
+        had 5 of 7 timeouts and only the last 2 reqs succeeded). Firing
+        them all at once and then waiting amortises the warm-up across
+        the batch, so a verifier that consumes the cache afterwards
+        sees a complete picture in one shot.
+
+        Returns a dict {name: value-or-None}. None means the FCU did not
+        respond within ``timeout_s`` for that name. Cached values are
+        returned without re-issuing a request.
+        """
+        if self._mav is None:
+            return {name: None for name in names}
+
+        events: dict[str, threading.Event] = {}
+        with self._param_lock:
+            for name in names:
+                if name in self._params:
+                    continue
+                ev = self._param_events.setdefault(name, threading.Event())
+                ev.clear()
+                events[name] = ev
+
+        for name in events:
+            try:
+                self._mav.mav.param_request_read_send(
+                    self._mav.target_system,
+                    self._mav.target_component,
+                    name.encode("ascii"),
+                    -1,
+                )
+            except Exception as exc:
+                print(f"[MAVLink] param_request_read({name!r}) error: {exc}")
+
+        deadline = time.monotonic() + timeout_s
+        for ev in events.values():
+            remaining = max(0.0, deadline - time.monotonic())
+            if remaining > 0.0:
+                ev.wait(remaining)
+
+        with self._param_lock:
+            return {name: self._params.get(name) for name in names}
+
     # ------------------------------------------------------------------
     #  Mode commands
     # ------------------------------------------------------------------

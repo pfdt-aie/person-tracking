@@ -141,3 +141,43 @@ def test_ground_test_DOES_emit_param_request_read():
     # And the existing control-write suppression is unaffected.
     assert "command_long" not in kinds
     assert "pos_target" not in kinds
+
+
+def test_prefetch_params_sends_one_request_per_uncached_name():
+    """prefetch_params fires PARAM_REQUEST_READ for every requested name
+    that isn't already cached, in parallel rather than sequentially."""
+    c, spy = _client(ground_test=False)
+    names = ["FENCE_ENABLE", "FENCE_RADIUS", "RTL_ALT"]
+    # tiny timeout — no replies arrive in this test
+    result = c.prefetch_params(names, timeout_s=0.05)
+
+    requested = [t[1][2] for t in spy.tx if t[0] == "param_request_read"]
+    # param_request_read_send receives name as the 3rd positional arg
+    # (target_system, target_component, name, index).
+    assert sorted(requested) == sorted(n.encode("ascii") for n in names)
+    assert set(result.keys()) == set(names)
+    assert all(v is None for v in result.values())   # nothing answered
+
+
+def test_prefetch_params_returns_cached_without_resending():
+    """If a name is already in the cache, no new PARAM_REQUEST_READ is sent."""
+    c, spy = _client(ground_test=False)
+    c._params["FENCE_ENABLE"] = 1.0      # pre-populate cache
+    result = c.prefetch_params(["FENCE_ENABLE", "RTL_ALT"], timeout_s=0.05)
+
+    requested = [t[1][2] for t in spy.tx if t[0] == "param_request_read"]
+    assert requested == [b"RTL_ALT"]                  # only the uncached name
+    assert result["FENCE_ENABLE"] == 1.0
+    assert result["RTL_ALT"] is None
+
+
+def test_prefetch_params_works_in_ground_test():
+    """Like fetch_param, prefetch is read-only and must run in --ground-test
+    so the bench operator can pre-warm the param cache before preflight."""
+    c, spy = _client(ground_test=True)
+    c.prefetch_params(["FENCE_ENABLE"], timeout_s=0.05)
+    kinds = [t[0] for t in spy.tx]
+    assert "param_request_read" in kinds
+    # Vehicle-control writes are still suppressed.
+    assert "command_long" not in kinds
+    assert "pos_target" not in kinds

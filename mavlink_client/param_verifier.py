@@ -106,6 +106,22 @@ class ParamVerifier:
         self._reqs = requirements if requirements is not None else default_requirements()
 
     def run(self) -> List[ParamCheck]:
+        # Issue every PARAM_REQUEST_READ in parallel and wait collectively,
+        # so the autopilot's param-response queue isn't the bottleneck. On
+        # a cold FCU, sequential fetch_param() with a 2 s per-param timeout
+        # used to fail the first ~5 requests and only succeed for the last
+        # few in the list (see field log 2026-05-16_19-18).  The
+        # subsequent per-name fetch_param calls hit the cache and return
+        # immediately, so the second loop is essentially free.
+        names = [r.name for r in self._reqs]
+        if hasattr(self._mav, "prefetch_params"):
+            try:
+                self._mav.prefetch_params(names, timeout_s=self._timeout)
+            except Exception as exc:
+                # Fall through to the per-param path on any error so the
+                # verifier still produces a meaningful report.
+                print(f"[ParamVerifier] prefetch failed: {exc}")
+
         out: List[ParamCheck] = []
         for req in self._reqs:
             try:

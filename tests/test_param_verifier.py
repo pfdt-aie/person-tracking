@@ -95,3 +95,57 @@ def test_default_requirements_lists_known_params():
     for expected in ("FENCE_ENABLE", "RTL_ALT", "BATT_FS_LOW_ACT",
                      "FS_GCS_ENABLE", "GUID_TIMEOUT"):
         assert expected in names
+
+
+class _BatchingFakeMav:
+    """Tracks prefetch + fetch calls so we can assert the verifier calls
+    prefetch_params once with the full list, then per-name fetch_param
+    after, hitting the cache."""
+    def __init__(self, values: dict):
+        self._values = dict(values)
+        self.prefetch_calls: list[list[str]] = []
+        self.fetch_calls:    list[str] = []
+
+    def prefetch_params(self, names: list, timeout_s: float = 5.0):
+        self.prefetch_calls.append(list(names))
+        return {n: self._values.get(n) for n in names}
+
+    def fetch_param(self, name, timeout=2.0):
+        self.fetch_calls.append(name)
+        return self._values.get(name)
+
+
+def test_verifier_calls_prefetch_once_with_all_param_names():
+    """The batch prefetch must include every requirement name and fire
+    exactly once per run() — sequential fetches would re-introduce the
+    cold-FCU timeout problem the prefetch is solving."""
+    mav = _BatchingFakeMav(_good_values())
+    v = ParamVerifier(mav, timeout_per_param=0.05)
+    v.run()
+    assert len(mav.prefetch_calls) == 1
+    assert set(mav.prefetch_calls[0]) == set(_good_values().keys())
+
+
+def test_verifier_falls_back_to_fetch_param_when_prefetch_missing():
+    """A mav stub without prefetch_params (e.g. unit-test fakes) must
+    still work — the verifier should silently skip the batch step and
+    proceed to per-name fetch."""
+    class _LegacyMav:
+        def fetch_param(self, name, timeout=2.0):
+            return _good_values().get(name)
+    v = ParamVerifier(_LegacyMav(), timeout_per_param=0.0)
+    assert v.all_pass() is True
+
+
+def test_verifier_tolerates_prefetch_exception():
+    """If prefetch raises (e.g. transport glitch), per-name fetch_param
+    must still run so the report isn't lost."""
+    class _BrokenPrefetchMav(_BatchingFakeMav):
+        def prefetch_params(self, names, timeout_s=5.0):
+            raise RuntimeError("link hiccup")
+    mav = _BrokenPrefetchMav(_good_values())
+    v = ParamVerifier(mav, timeout_per_param=0.0)
+    results = v.run()
+    # We still got per-param results from the fallback path.
+    assert len(results) == len(_good_values())
+    assert all(c.ok for c in results)
