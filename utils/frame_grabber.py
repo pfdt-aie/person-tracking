@@ -107,6 +107,10 @@ class FrameGrabber:
 
         # 3. FFmpeg fallback — higher latency but universal
         print("[GRAB] WARN: GStreamer unavailable — using FFmpeg (higher latency)")
+        print("[GRAB]       Fix: sudo apt install -y gstreamer1.0-plugins-good "
+              "gstreamer1.0-plugins-bad gstreamer1.0-libav python3-gst-1.0")
+        print("[GRAB]       Then verify: python3 -c \"import gi; gi.require_version('Gst','1.0'); "
+              "from gi.repository import Gst; print(Gst.version())\"")
         cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
