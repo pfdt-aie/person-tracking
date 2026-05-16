@@ -955,7 +955,12 @@ class MAVLinkClient:
                     (e.g. ``"E-STOP stage 1"``).
 
         Returns:
-            True if autopilot accepted the command.
+            True if autopilot accepted the command. False on ACK
+            rejection or timeout. Note: a False return does NOT mean
+            the FCU is in the WRONG mode — preflight reads the live
+            HEARTBEAT-reported mode separately, so if the FCU happens
+            to already be in the target mode, the arm path can still
+            proceed.
         """
         ok = self.send_command_with_ack(
             mavutil.mavlink.MAV_CMD_DO_SET_MODE,
@@ -965,9 +970,26 @@ class MAVLinkClient:
         if ok:
             tail = f" ({suffix})" if suffix else ""
             print(f"[MAVLink] {label} mode confirmed{tail}")
-        else:
-            print(f"[MAVLink] WARNING: {label} mode not confirmed by autopilot")
-        return ok
+            return True
+
+        # ACK rejection or timeout — give the operator something
+        # actionable rather than a single-line WARNING.
+        current = self._mode if self._mode not in ("UNKNOWN", "") else "?"
+        print(f"[MAVLink] WARNING: {label} mode not confirmed by autopilot "
+              f"(FCU currently reports: {current})")
+        print(f"[MAVLink]   Possible causes:")
+        print(f"[MAVLink]     - RC mode switch overriding "
+              f"(move it off conflicting modes before retry)")
+        print(f"[MAVLink]     - MAVLink link congestion "
+              f"(another GCS on the same TELEM port?)")
+        print(f"[MAVLink]     - FCU busy (boot, calibration, "
+              f"arming sequence) — wait a few seconds and retry")
+        print(f"[MAVLink]   Preflight verifies the live HEARTBEAT mode "
+              f"separately, so if the FCU is already in {label}, arm can")
+        print(f"[MAVLink]   still proceed. Run 'preflight' from stdin to "
+              f"check.")
+        safe_event("mode_set_failed", target=label, current=current)
+        return False
 
     def set_mode_guided(self) -> bool:
         """Switch to GUIDED mode (ACK-confirmed)."""

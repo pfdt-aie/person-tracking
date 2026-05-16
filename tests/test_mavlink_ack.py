@@ -91,3 +91,43 @@ def test_no_mav_returns_false():
     assert client._mav is None
     ok = client.send_command_with_ack(176)
     assert ok is False
+
+
+# ----------------------------------------------------------------------
+#  B1 — actionable messaging when SET_MODE fails to ACK
+# ----------------------------------------------------------------------
+
+def test_set_mode_failure_prints_actionable_hint(capsys):
+    """Pre-fix the only feedback on SET_MODE failure was a single-line
+    'WARNING: GUIDED mode not confirmed by autopilot'. That left the
+    operator with no idea what to try next. Now the warning enumerates
+    the typical causes and points at the preflight gate for verification."""
+    client = _client_with_mock_mav()
+    client._mode = "STABILIZE"   # simulated current FCU-reported mode
+    # No ACK ever arrives — set_mode_guided() will time out.
+    ok = client.set_mode_guided()
+    assert ok is False
+
+    out = capsys.readouterr().out
+    assert "GUIDED mode not confirmed" in out
+    # The improved message includes:
+    assert "FCU currently reports: STABILIZE" in out      # diagnostic context
+    assert "RC mode switch overriding" in out             # cause #1
+    assert "MAVLink link congestion" in out               # cause #2
+    assert "FCU busy" in out                              # cause #3
+    assert "Preflight verifies" in out                    # next-step hint
+
+
+def test_set_mode_success_does_not_print_hint(capsys):
+    """The actionable hint must only appear on failure — a successful
+    SET_MODE should print one clean confirmation line, no warning block."""
+    client = _client_with_mock_mav()
+    CMD = 176
+    _simulate_ack(client, CMD, result=0, delay=0.02)
+    ok = client.set_mode_guided()
+    assert ok is True
+
+    out = capsys.readouterr().out
+    assert "GUIDED mode confirmed" in out
+    assert "WARNING" not in out
+    assert "Possible causes" not in out
