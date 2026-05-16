@@ -268,12 +268,20 @@ class SafetyMonitor:
 
         Args:
             last_heartbeat_t: monotonic timestamp of the last received heartbeat.
+                              <= 0.0 is the convention for "never received yet"
+                              (see MAVLinkClient._hb_time initial value).
 
         Returns:
-            True if heartbeat is fresh. False if stale (> HEARTBEAT_WATCHDOG_S).
+            True if heartbeat is fresh. False if stale (> HEARTBEAT_WATCHDOG_S)
+            or never received.
         """
-        age = time.monotonic() - last_heartbeat_t
         watchdog = self._s.heartbeat_watchdog_s
+        if last_heartbeat_t <= 0.0:
+            if not self._hb_warn_logged:
+                self._log("MAVLink heartbeat lost (none received yet)")
+                self._hb_warn_logged = True
+            return False
+        age = time.monotonic() - last_heartbeat_t
         if age <= self._s.heartbeat_warn_s:
             self._hb_warn_logged = False
         elif age > watchdog:

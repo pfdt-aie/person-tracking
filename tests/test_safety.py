@@ -136,3 +136,11 @@ def test_watchdog_warn_band_returns_true_but_logs():
     warn_age = (cfg.HEARTBEAT_WARN_S + cfg.HEARTBEAT_WATCHDOG_S) / 2.0
     t = time.monotonic() - warn_age
     assert s.watchdog_heartbeat(t) is True   # still in healthy band
+
+
+def test_watchdog_never_received_returns_false():
+    # MAVLinkClient._hb_time defaults to 0.0 before the first HEARTBEAT
+    # arrives. The watchdog must report False (not "now-0 seconds stale").
+    s = _safety()
+    assert s.watchdog_heartbeat(0.0) is False
+    assert s.watchdog_heartbeat(-1.0) is False
