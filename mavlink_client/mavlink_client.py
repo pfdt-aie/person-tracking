@@ -28,6 +28,7 @@ Usage:
     mav.close()
 """
 
+import collections
 import math
 import threading
 import time
@@ -120,6 +121,7 @@ class MAVLinkClient:
 
         self._cell_count:   int   = self._s.default_cells
         self._cell_detected: bool = False
+        self._cell_ambig_warned: bool = False  # rate-limits the "ambiguous" log to one line per session
 
         # C1: ArduPilot onboard fence breach
         self._fence_breached:    bool = False
@@ -149,6 +151,17 @@ class MAVLinkClient:
         self._ground_test_banner_t: float = 0.0
         if self._ground_test:
             print("[MAVLink] GROUND-TEST MODE — all TX suppressed; RX unchanged")
+
+        # Mode-flapping detector. RC pilot input vs tracker SET_MODE GUIDED can
+        # produce hundreds of mode transitions per minute (see logs 2026-05-16).
+        # Track transitions in a rolling window and collapse them into a single
+        # "flapping" summary so the log stays usable.
+        self._mode_xitions:  collections.deque[float] = collections.deque(maxlen=64)
+        self._mode_flapping: bool = False
+        self._mode_flap_count: int = 0
+        self._MODE_FLAP_WINDOW_S:    float = 10.0
+        self._MODE_FLAP_TRIGGER_N:   int   = 6    # 6 transitions in 10s = flapping
+        self._MODE_FLAP_CLEAR_N:     int   = 2    # ≤2 in the window = stable again
 
     # ------------------------------------------------------------------
     #  Connection lifecycle
@@ -259,19 +272,11 @@ class MAVLinkClient:
                         self._armed   = bool(
                             msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
                         )
-                        # C2: log mode transitions
+                        # C2: log mode transitions, but collapse runaway flapping
+                        # so a stuck RC switch can't produce 100+ lines of noise.
                         new_mode = mavutil.mode_string_v10(msg)
                         if new_mode != self._mode and self._mode not in ("UNKNOWN", ""):
-                            print(f"[MAVLink] Flight mode: {self._mode} → {new_mode}")
-                            safe_event("mode_change", prev=self._mode, new=new_mode)
-                            if self._mode == "GUIDED" and new_mode != "GUIDED":
-                                print("[MAVLink] ⚠ Left GUIDED mode — "
-                                      "operator override or failsafe")
-                                # S3.6 — latch RC override. Tracker must
-                                # re-arm explicitly to clear.
-                                self._rc_override_latched = True
-                                safe_event("rc_override", prev_mode=self._mode,
-                                           new_mode=new_mode)
+                            self._handle_mode_transition(self._mode, new_mode)
                         self._mode = new_mode
 
                     elif t == "ATTITUDE":
@@ -394,6 +399,60 @@ class MAVLinkClient:
             pass
 
     # ------------------------------------------------------------------
+    #  Mode transition handler (with flap collapsing)
+    # ------------------------------------------------------------------
+
+    def _handle_mode_transition(self, prev_mode: str, new_mode: str) -> None:
+        """Log a flight-mode transition with built-in flap suppression.
+
+        Pure function of (prev_mode, new_mode, current time). Pulled out of
+        the rx loop so it can be unit-tested without spinning up a real
+        MAVLink connection. Mutates self._mode_xitions / self._mode_flapping
+        / self._mode_flap_count / self._rc_override_latched.
+        """
+        now_m = time.monotonic()
+        self._mode_xitions.append(now_m)
+        cutoff = now_m - self._MODE_FLAP_WINDOW_S
+        while self._mode_xitions and self._mode_xitions[0] < cutoff:
+            self._mode_xitions.popleft()
+        recent_n = len(self._mode_xitions)
+
+        # Trigger flap mode once we cross the threshold.
+        if not self._mode_flapping and recent_n >= self._MODE_FLAP_TRIGGER_N:
+            self._mode_flapping = True
+            self._mode_flap_count = recent_n
+            print(f"[MAVLink] ⚠ Mode flapping detected "
+                  f"({recent_n} transitions in "
+                  f"{self._MODE_FLAP_WINDOW_S:.0f}s) — "
+                  f"suppressing per-transition logs; "
+                  f"likely RC pilot vs tracker conflict")
+            safe_event("mode_flap_start", count=recent_n,
+                       window_s=self._MODE_FLAP_WINDOW_S)
+
+        if self._mode_flapping:
+            self._mode_flap_count += 1
+            if recent_n <= self._MODE_FLAP_CLEAR_N:
+                print(f"[MAVLink] Mode flapping ended "
+                      f"(total {self._mode_flap_count} transitions); "
+                      f"now {new_mode}")
+                safe_event("mode_flap_end", total=self._mode_flap_count,
+                           final=new_mode)
+                self._mode_flapping = False
+                self._mode_flap_count = 0
+        else:
+            print(f"[MAVLink] Flight mode: {prev_mode} → {new_mode}")
+
+        safe_event("mode_change", prev=prev_mode, new=new_mode)
+
+        if prev_mode == "GUIDED" and new_mode != "GUIDED":
+            if not self._mode_flapping:
+                print("[MAVLink] ⚠ Left GUIDED mode — "
+                      "operator override or failsafe")
+            # S3.6 — latch RC override. Tracker must re-arm explicitly to clear.
+            self._rc_override_latched = True
+            safe_event("rc_override", prev_mode=prev_mode, new_mode=new_mode)
+
+    # ------------------------------------------------------------------
     #  Battery cell-count auto-detection
     # ------------------------------------------------------------------
 
@@ -443,12 +502,18 @@ class MAVLinkClient:
             self._safety.set_cell_count(estimated)
             print(f"[MAVLink] Battery: cell_count.detected n={estimated}S "
                   f"v_per_cell={v_mv/estimated:.0f}mV confidence={confidence}")
-        else:
+        elif not self._cell_ambig_warned:
+            # First time we see ambiguity, tell the operator how to fix it.
+            # Stay silent on subsequent SYS_STATUS messages so the log isn't
+            # spammed at ~2 Hz; detection will still re-run each tick in case
+            # the voltage settles into a non-ambiguous range.
+            self._cell_ambig_warned = True
             print(
                 f"[MAVLink] Battery cell detection ambiguous "
                 f"({v_mv}mV / {nominal}mV = {ratio:.2f}, "
                 f"confidence={confidence}) — using default "
-                f"{self._s.default_cells}S. Override with --cells N."
+                f"{self._s.default_cells}S. Override with --cells N. "
+                f"(suppressing further ambiguity warnings this session)"
             )
 
     # ------------------------------------------------------------------

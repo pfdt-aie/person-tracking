@@ -69,3 +69,18 @@ def test_override_5s_logs_correct_count(capsys):
     c._detect_cell_count()
     out = capsys.readouterr().out
     assert "n=5S" in out
+
+
+def test_ambiguous_message_prints_once_only(capsys):
+    """Ambiguous detection used to fire every SYS_STATUS (~2 Hz) — 70+
+    duplicate lines per session. Now it should only print on the first
+    occurrence and stay silent after."""
+    c, _ = _client(override=0, voltage_mv=13000)   # ambiguous ratio ~3.51
+
+    for _ in range(50):
+        c._detect_cell_count()
+
+    out = capsys.readouterr().out
+    occurrences = out.count("Battery cell detection ambiguous")
+    assert occurrences == 1, f"expected 1 ambiguous warning, got {occurrences}"
+    assert "suppressing further ambiguity warnings" in out

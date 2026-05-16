@@ -228,6 +228,7 @@ class PersonGimbalTracker:
 
         # --- Misc runtime state ---
         self._last_id_report:     float = 0.0
+        self._last_id_signature:  tuple = ()    # (frozenset of IDs, lock_id) — dedup [IDs] prints
         self._last_battery_poll:  float = 0.0
         self._last_battery_print: float = 0.0
         self._last_gimbal_warn:   float = 0.0
@@ -777,18 +778,30 @@ class PersonGimbalTracker:
                     person_detected = target_info is not None
                     self._latest_target_info = target_info
 
-                # Headless ID report
+                # Headless ID report — print only when the ID set or lock state
+                # changes, plus a heartbeat every 30s if anything is detected,
+                # so logs stay greppable instead of repeating per-frame.
                 if not self.show_display:
                     now_r = time.time()
-                    if now_r - self._last_id_report >= cfg.ID_REPORT_INTERVAL:
+                    id_snap = dict(ts.detected_ids)
+                    signature = (frozenset(id_snap.keys()), ts.lock_id)
+                    changed = signature != self._last_id_signature
+                    heartbeat = (
+                        id_snap
+                        and now_r - self._last_id_report >= max(30.0, cfg.ID_REPORT_INTERVAL * 15)
+                    )
+                    if id_snap and (changed or heartbeat):
                         self._last_id_report = now_r
-                        id_snap = dict(ts.detected_ids)
-                        if id_snap:
-                            id_str   = "  ".join(
-                                f"ID {t}@({d.cx:.0f},{d.cy:.0f})" for t, d in id_snap.items())
-                            lock_str = (f"  [locked={ts.lock_id}]"
-                                        if ts.lock_id is not None else "")
-                            print(f"[IDs] {id_str}{lock_str}  | 'track <id>' to lock")
+                        self._last_id_signature = signature
+                        id_str   = "  ".join(
+                            f"ID {t}@({d.cx:.0f},{d.cy:.0f})" for t, d in id_snap.items())
+                        lock_str = (f"  [locked={ts.lock_id}]"
+                                    if ts.lock_id is not None else "")
+                        print(f"[IDs] {id_str}{lock_str}  | 'track <id>' to lock")
+                    elif not id_snap and self._last_id_signature:
+                        # IDs went from "something" to nothing — note it once.
+                        self._last_id_signature = signature
+                        print("[IDs] (none detected)")
 
                 # --- Gimbal state machine (inner loop ~30 Hz) ---
                 if ts.mode == "AUTO":
