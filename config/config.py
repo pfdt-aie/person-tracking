@@ -179,7 +179,7 @@ LISSAJOUS_RECENTER_DWELL: float  = 2.0
 # =============================================================================
 
 # --- MAVLink connection ---
-MAVLINK_DEVICE: str  = "/dev/ttyACM0" # USB serial to Orange Cube+
+MAVLINK_DEVICE: str  = "/dev/ttyTHS1" # Tegra UART → Cube TELEM1/2 (override with --device for USB CDC e.g. /dev/ttyACM0)
 MAVLINK_BAUD: int    = 921600
 
 # --- Following geometry ---
