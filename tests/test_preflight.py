@@ -192,6 +192,40 @@ def test_rc_never_seen_shows_explicit_message():
     rc = items["RC transmitter connected"]
     assert rc.ok is False
     assert "never received" in rc.message
+    # A5 — the "never received" case should also point at the ArduPilot
+    # SR*_RC_CHAN param, because the operator's first instinct is to
+    # debug the radio rather than the streaming-rate config.
+    assert "SR" in rc.message and "_RC_CHAN" in rc.message
+
+
+class _MultiFailVerifier:
+    """Returns 4 failing params + 1 OK — matches the field scenario where
+    the preflight summary used to say 'FENCE_ENABLE: ... (+3 more)' and
+    left the operator guessing which 3."""
+    def run(self):
+        from mavlink_client.param_verifier import ParamCheck
+        return [
+            ParamCheck("FENCE_ENABLE", False, 0.0, "0.0 == 1.0"),
+            ParamCheck("SR1_RC_CHAN", False, 0.0, "0.0 == 5.0"),
+            ParamCheck("LAND_SPEED", False, 30.0, "30.0 == 50.0"),
+            ParamCheck("RTL_ALT", False, 1500.0, "1500.0 == 3000.0"),
+            ParamCheck("BATT_MONITOR", True, 4.0, "OK"),
+        ]
+
+
+def test_param_failure_enumerates_every_failing_name():
+    """A1 — operator must see all failing params, not just the first + count."""
+    pf = _pf(verifier=_MultiFailVerifier())
+    items = {c.name: c for c in pf.run()}
+    msg = items["ArduPilot params correct"].message
+    # All four failing names appear in the message
+    for name in ("FENCE_ENABLE", "SR1_RC_CHAN", "LAND_SPEED", "RTL_ALT"):
+        assert name in msg, f"expected {name} in preflight message, got: {msg}"
+    # The OK one does not appear
+    assert "BATT_MONITOR" not in msg
+    # The truncation phrase is gone
+    assert "+3 more" not in msg
+    assert "+1 more" not in msg
 
 
 def test_rc_connected_shows_channel_and_rssi():

@@ -212,7 +212,19 @@ def main() -> int:
     try:
         from tracker import PersonGimbalTracker
         tracker = PersonGimbalTracker(drone_enabled=args.drone, settings=settings)
-        tracker.run()
+        try:
+            tracker.run()
+        except KeyboardInterrupt:
+            # Ctrl-C: tracker.run() has its own try/finally that performs the
+            # safety-critical cleanup (gimbal home, recording flush, MAVLink
+            # close). We swallow the exception AFTER that cleanup has had a
+            # chance to run, so the log gets a clean "shutdown via SIGINT"
+            # line instead of a cv2 traceback. The outer `finally` below
+            # still flushes the session log and tears down stdout
+            # redirection. We do NOT auto-disarm or auto-land here — those
+            # are intentional operator actions, not shutdown side effects.
+            print("[Cleanup] Shutdown via SIGINT (Ctrl-C) — use 'q' from stdin "
+                  "for a fully clean exit next time")
     finally:
         print(f"\n[Log] Session end: {datetime.now().strftime('%Y-%m-%d  %H:%M:%S')}")
         close_flight_log()

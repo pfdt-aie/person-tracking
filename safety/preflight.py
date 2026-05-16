@@ -224,11 +224,20 @@ class PreflightCheck:
             age = float(self._mav.get_rc_age_s())
         except Exception:
             age = float("inf")
-        msg = (f"no RC_CHANNELS for {age:.1f}s - turn on transmitter "
-               "and check bind") if age != float("inf") \
-              else "RC_CHANNELS never received - transmitter off or unbound"
+        if age != float("inf"):
+            base = f"no RC_CHANNELS for {age:.1f}s - turn on transmitter and check bind"
+        else:
+            # 'Never received' is also produced when the autopilot isn't
+            # streaming RC_CHANNELS over MAVLink at all, even with TX on.
+            # Point the operator at the relevant ArduPilot params so they
+            # don't waste time on the radio side.
+            base = (
+                "RC_CHANNELS never received - transmitter off/unbound OR "
+                "ArduPilot SR*_RC_CHAN=0 on the TELEM port wired to the "
+                "companion (try SR1_RC_CHAN=5 or SR2_RC_CHAN=5)"
+            )
         return PreflightItem(
-            name="RC transmitter connected", ok=False, message=msg,
+            name="RC transmitter connected", ok=False, message=base,
         )
 
     def _check_fence(self) -> PreflightItem:
@@ -268,13 +277,15 @@ class PreflightCheck:
         if not bad:
             return PreflightItem("ArduPilot params correct", True,
                                  f"{len(results)} params OK")
-        # Build a concise summary; full detail logged elsewhere.
-        first = bad[0]
-        more = f" (+{len(bad) - 1} more)" if len(bad) > 1 else ""
+        # Enumerate every failing param so the operator can fix them in one
+        # pass. Previously truncated to "first + (N more)", which forced the
+        # operator to guess what the rest were. Joined with '; ' so the
+        # operator-input printer can split them onto separate lines.
+        detail = "; ".join(f"{r.name}: {r.message}" for r in bad)
         return PreflightItem(
             name="ArduPilot params correct",
             ok=False,
-            message=f"{first.name}: {first.message}{more}",
+            message=f"{len(bad)} failing — {detail}",
         )
 
     def _check_battery(self) -> PreflightItem:

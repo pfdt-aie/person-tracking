@@ -365,6 +365,31 @@ class OperatorInputController:
             print(f"[Cmd] {label}" + (f" — {msg}" if msg else ""))
         else:
             print(f"[Cmd] {verb} refused: {msg or 'unknown error'}")
+            self._print_preflight_breakdown(result)
+
+    def _print_preflight_breakdown(self, result: dict) -> None:
+        """Render per-failing-item lines under a refused arm/takeoff.
+
+        ``result['items']`` is the structured preflight list returned by the
+        underlying handler. We surface only the failing items so the operator
+        knows exactly what to fix, without re-reading the entire checklist.
+        Splits semicolon-separated detail (e.g. multi-param failures) onto
+        their own indented lines so the output stays scannable.
+        """
+        items = result.get("items") or []
+        bad   = [it for it in items if not it.get("ok")]
+        if not bad:
+            return
+        print(f"[Cmd]   {len(bad)} preflight item(s) failing:")
+        for it in bad:
+            name = it.get("name", "?")
+            msg  = it.get("message", "")
+            print(f"[Cmd]     - {name}" + (f": {msg.split('; ', 1)[0]}" if msg else ""))
+            # If message contains multiple '; '-joined detail entries
+            # (e.g. the params list), indent each on its own line.
+            if msg and "; " in msg:
+                for extra in msg.split("; ")[1:]:
+                    print(f"[Cmd]         {extra}")
 
     def _handle_stdin_takeoff(self, alt: Optional[float]) -> None:
         """Stdin wrapper around the handle_takeoff callback.
@@ -392,6 +417,7 @@ class OperatorInputController:
                   + (f" — {msg}" if msg else ""))
         else:
             print(f"[Cmd] takeoff refused: {msg or 'unknown error'}")
+            self._print_preflight_breakdown(result)
 
     def _handle_stdin_estop(self) -> None:
         """Software E-STOP for the SSH operator.
@@ -527,9 +553,39 @@ class OperatorInputController:
             print(line)
         print(f"  passed={passed}/{len(items)}")
 
+    # Display-window keyboard shortcuts that operators sometimes type at
+    # the stdin prompt by habit (especially after using the UI / display).
+    # Map each single-letter shortcut to the equivalent stdin command(s)
+    # so the operator gets an actionable hint instead of a bare "unknown".
+    # NOTE: we deliberately do NOT alias these into real commands —
+    # mistyping 't' while the tracker is armed should not silently disable
+    # tracking. The hint is informational only.
+    _DISPLAY_KEY_HINTS: dict = {
+        "t": "track on / track off  (or 'ids' + 'track <id>')",
+        "r": "center",
+        "s": "search on / search off / search restart",
+        "i": "search restart",
+        "z": "zoom in",
+        "x": "zoom out",
+        "a": "autozoom on / autozoom off",
+        "v": "rec  (or rec on / rec off)",
+        "l": "stream on / stream off",
+        "m": "mode auto / mode manual",
+        "d": "(display toggle is display-only; no stdin equivalent)",
+        "q": "q",
+    }
+
     def _print_unknown(self, line: str) -> None:
         """Print an 'unknown command' hint and log it to the flight log."""
         print(f"[Cmd] unknown: {line!r} — type 'help' for the list")
+        # If the operator typed a single-character display-window shortcut,
+        # tell them which stdin command to use instead. Headless sessions
+        # have no display window, so 't' / 'r' / etc. fall through here
+        # and otherwise produce a confusing "unknown" with no remedy.
+        stripped = line.strip().lower()
+        if stripped in self._DISPLAY_KEY_HINTS:
+            print(f"[Cmd]   '{stripped}' is a display-window shortcut; "
+                  f"from stdin use: {self._DISPLAY_KEY_HINTS[stripped]}")
         safe_event("ssh_unknown_command", line=line)
 
     # ------------------------------------------------------------------

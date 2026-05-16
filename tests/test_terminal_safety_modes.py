@@ -540,3 +540,87 @@ def test_stdin_handler_exception_does_not_kill_loop(monkeypatch, capsys):
     # Most important assertion: the second 'track on' reached the
     # helper, so the loop survived the first exception.
     assert calls["n"] == 2
+
+
+# ----------------------------------------------------------------------
+#  Sprint A — UX clarity for arm/takeoff refusals + display-key hints
+# ----------------------------------------------------------------------
+
+def test_arm_refused_renders_each_failing_item_on_its_own_line(capsys):
+    """A2 — operator must see per-item reasons under a refused arm, not
+    just a comma-joined name list. Multi-part param messages (joined by
+    '; ') indent each part for scannability."""
+    refused = {
+        "status": "error",
+        "armed":  False,
+        "msg":    "preflight failing: Vehicle ARMED, ArduPilot params correct",
+        "items": [
+            {"name": "MAVLink connected", "ok": True,  "message": "link up"},
+            {"name": "Vehicle ARMED",     "ok": False, "message": "FCU reports disarmed"},
+            {"name": "ArduPilot params correct", "ok": False,
+             "message": "2 failing — FENCE_ENABLE: 0.0 == 1.0; SR1_RC_CHAN: 0.0 == 5.0"},
+        ],
+    }
+    c = _make_op(handle_arm=MagicMock(return_value=refused))
+    c._handle_stdin_arm(True)
+    out = capsys.readouterr().out
+    assert "arm refused" in out
+    assert "2 preflight item(s) failing" in out
+    assert "Vehicle ARMED" in out
+    assert "FCU reports disarmed" in out
+    # First param appears on the parent line, the rest are indented.
+    assert "FENCE_ENABLE" in out
+    assert "SR1_RC_CHAN" in out
+    # The OK check is NOT echoed (only failing ones).
+    assert "MAVLink connected" not in out
+
+
+def test_arm_success_does_not_render_breakdown(capsys):
+    """The breakdown is only for the refused path — a successful arm
+    must not spew the (empty) failing-items list."""
+    ok = {"status": "ok", "armed": True, "msg": "armed", "items": []}
+    c = _make_op(handle_arm=MagicMock(return_value=ok))
+    c._handle_stdin_arm(True)
+    out = capsys.readouterr().out
+    assert "ARMED" in out
+    assert "preflight item(s) failing" not in out
+
+
+def test_display_key_t_prints_hint(capsys):
+    """A3 — typing 't' (a display-window shortcut) from stdin must
+    produce an actionable hint, NOT silently alias to 'track on/off'."""
+    c = _make_op()
+    c._print_unknown("t")
+    out = capsys.readouterr().out
+    assert "unknown" in out
+    assert "display-window shortcut" in out
+    assert "track on" in out
+
+
+def test_display_key_hint_is_case_insensitive(capsys):
+    c = _make_op()
+    c._print_unknown("T")
+    out = capsys.readouterr().out
+    assert "display-window shortcut" in out
+
+
+def test_truly_unknown_command_still_just_says_unknown(capsys):
+    """Random garbage that isn't a display-shortcut should NOT get a
+    spurious hint — only single-key shortcuts trigger the hint path."""
+    c = _make_op()
+    c._print_unknown("blargh")
+    out = capsys.readouterr().out
+    assert "unknown" in out
+    assert "display-window shortcut" not in out
+
+
+def test_display_key_hint_does_not_alias_to_real_command():
+    """Safety guardrail — hints must NOT actually execute the command.
+    A stray 't' while armed must not toggle tracking off."""
+    arm_cb = MagicMock()
+    track_cb = MagicMock()
+    c = _make_op(handle_arm=arm_cb)
+    # If 't' were aliased to anything, calling _print_unknown('t')
+    # would have side effects on the controller. It should not.
+    c._print_unknown("t")
+    arm_cb.assert_not_called()
