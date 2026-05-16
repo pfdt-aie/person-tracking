@@ -283,6 +283,9 @@ body{{display:flex;flex-direction:column;font-family:monospace;color:#ddd}}
 .pferr{{color:#ff8080}}
 .pfrow{{display:flex;justify-content:space-between;padding:2px 0;
         border-bottom:1px dotted #333}}
+.pfdetail{{font-size:11px;color:#ffb0a0;padding:1px 0 2px 12px;
+           border-bottom:1px dotted #222;line-height:1.35}}
+.pfdetail::before{{content:"\\21B3  ";color:#666}}
 #armgo{{background:#226600;color:#fff;border:1px solid #5acc5a;
        padding:4px 10px;cursor:pointer;border-radius:4px;font-weight:bold}}
 #armgo:hover{{background:#338833}}
@@ -585,11 +588,26 @@ function refreshPreflight() {{
       const left = document.createElement('span');
       left.textContent = it.name;
       left.className = it.ok ? 'pfok' : 'pferr';
+      // For failing items with a multi-part message (joined by '; ' —
+      // see _check_params in safety/preflight.py), show only the
+      // headline on the right and break each detail onto its own
+      // indented sub-line below. Matches what stdin operators see via
+      // OperatorInputController._print_preflight_breakdown so the two
+      // views stay coherent.
+      const msg = it.ok ? 'OK' : (it.message || 'FAIL');
+      const parts = (!it.ok && msg.includes('; ')) ? msg.split('; ') : [msg];
       const right = document.createElement('span');
-      right.textContent = it.ok ? 'OK' : (it.message || 'FAIL');
+      right.textContent = parts[0];
       right.className = it.ok ? 'pfok' : 'pferr';
       row.appendChild(left); row.appendChild(right);
       list.appendChild(row);
+      // Indented detail rows for parts 1..N
+      for (let i = 1; i < parts.length; i++) {{
+        const det = document.createElement('div');
+        det.className = 'pfdetail';
+        det.textContent = parts[i];
+        list.appendChild(det);
+      }}
     }});
     document.getElementById('armgo').disabled = !d.all_ok;
     const btn = document.getElementById('armbtn');

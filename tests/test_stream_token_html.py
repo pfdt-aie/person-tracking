@@ -27,3 +27,27 @@ def test_stream_html_appends_token_to_control_fetches():
     assert "SAFE TO FOLLOW" in html
     assert "HOLDING" in html
     assert "PILOT ACTION REQUIRED" in html
+
+
+def test_stream_html_renders_preflight_breakdown_on_semicolon():
+    """Sprint E — the web UI must split multi-part preflight messages
+    (joined by '; ' in _check_params) into separate indented sub-lines
+    instead of cramming a ~300-char string into a single span. Mirrors
+    the stdin breakdown rendered by
+    OperatorInputController._print_preflight_breakdown."""
+    html = StreamServer()._build_html().decode()
+    # The split logic and the pfdetail row must both be present.
+    assert "msg.includes('; ')" in html
+    assert "msg.split('; ')" in html
+    assert "pfdetail" in html
+    # The CSS class must be defined too — without it the sub-lines
+    # would render with no visual distinction.
+    assert ".pfdetail" in html
+
+
+def test_preflight_breakdown_only_for_failing_items():
+    """An OK item with an empty/short message should not produce
+    pfdetail rows — only failing items with explicit ';'-joined detail."""
+    html = StreamServer()._build_html().decode()
+    # Guard condition prevents pfdetail rows on OK items.
+    assert "!it.ok && msg.includes('; ')" in html
