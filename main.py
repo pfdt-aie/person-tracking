@@ -42,8 +42,21 @@ enforce_dependencies(pathlib.Path(__file__).resolve().parent / "requirements.txt
 
 # Pin Ultralytics settings dir before any ultralytics import so it lands
 # in a predictable location regardless of systemd user or read-only home.
-_ul_dir = pathlib.Path("/tmp/ultralytics")
-_ul_dir.mkdir(parents=True, exist_ok=True)
+# Prefer ~/.cache/ultralytics (persistent) over /tmp/ultralytics (tmpfs,
+# wiped on every reboot). The tmpfs path produced a 'Creating new
+# Ultralytics Settings v0.0.6 file' banner on every cold-boot launch,
+# which is just noise. If $HOME is unwritable (rare — read-only home in
+# a systemd-user unit), fall back to /tmp so startup never fails here.
+def _resolve_ul_dir() -> pathlib.Path:
+    home_cache = pathlib.Path.home() / ".cache" / "ultralytics"
+    try:
+        home_cache.mkdir(parents=True, exist_ok=True)
+        return home_cache
+    except (OSError, RuntimeError):
+        tmp = pathlib.Path("/tmp/ultralytics")
+        tmp.mkdir(parents=True, exist_ok=True)
+        return tmp
+_ul_dir = _resolve_ul_dir()
 os.environ.setdefault("YOLO_CONFIG_DIR", str(_ul_dir))
 
 import torch
