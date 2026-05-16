@@ -541,17 +541,33 @@ class OperatorInputController:
             return
         print("[Cmd] preflight:")
         passed = 0
+        waiting = 0
         for it in items:
-            ok   = bool(it.get("ok"))
-            tag  = "[OK]  " if ok else "[FAIL]"
+            ok = bool(it.get("ok"))
+            outdoor_only = bool(it.get("outdoor_only", False))
+            # Outdoor-only items that haven't passed yet are 'waiting' rather
+            # than 'failing' — they cannot pass on a bench and the operator
+            # should not chase them. The arm gate still requires ok=True for
+            # all items, so this is a display affordance only.
+            if ok:
+                tag = "[OK]  "
+                passed += 1
+            elif outdoor_only:
+                tag = "[WAIT]"
+                waiting += 1
+            else:
+                tag = "[FAIL]"
             name = it.get("name", "?")
             msg  = it.get("message", "")
-            passed += int(ok)
             line = f"  {tag} {name}"
             if msg:
                 line += f"  — {msg}"
             print(line)
-        print(f"  passed={passed}/{len(items)}")
+        summary = f"  passed={passed}/{len(items)}"
+        if waiting:
+            summary += (f"  ({waiting} waiting on GPS/HOME — "
+                        f"required for flight, not for bench)")
+        print(summary)
 
     # Display-window keyboard shortcuts that operators sometimes type at
     # the stdin prompt by habit (especially after using the UI / display).

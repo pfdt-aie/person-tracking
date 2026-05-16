@@ -28,9 +28,20 @@ class PreflightItem:
     name:    str
     ok:      bool
     message: str
+    outdoor_only: bool = False   # True when this gate cannot pass indoors
+                                 # (GPS lock, HOME position). The arm gate
+                                 # STILL requires ok=True; this flag is for
+                                 # the UI/stdin to mark indoor-expected
+                                 # failures as 'waiting for GPS' rather
+                                 # than coloring them like a real bug.
 
     def to_dict(self) -> dict:
-        return {"name": self.name, "ok": self.ok, "message": self.message}
+        return {
+            "name": self.name,
+            "ok": self.ok,
+            "message": self.message,
+            "outdoor_only": self.outdoor_only,
+        }
 
 
 class PreflightCheck:
@@ -135,6 +146,7 @@ class PreflightCheck:
             name="HOME position set",
             ok=ok,
             message="" if ok else "FCU has not advertised HOME yet",
+            outdoor_only=True,    # HOME is set when GPS lock acquires
         )
 
     def _check_gps(self) -> PreflightItem:
@@ -169,7 +181,10 @@ class PreflightCheck:
             if sats < cfg.GPS_MIN_SATS:
                 reasons.append(f"sats={sats}<{cfg.GPS_MIN_SATS}")
             msg = "; ".join(reasons) or "GPS not ready"
-        return PreflightItem(name="GPS fix OK", ok=ok, message=msg)
+        return PreflightItem(
+            name="GPS fix OK", ok=ok, message=msg,
+            outdoor_only=True,   # indoor multipath = no usable fix
+        )
 
     def _check_sensors(self) -> PreflightItem:
         try:

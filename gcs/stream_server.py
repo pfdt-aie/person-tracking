@@ -281,6 +281,7 @@ body{{display:flex;flex-direction:column;font-family:monospace;color:#ddd}}
 #pflist{{margin-bottom:10px}}
 .pfok{{color:#7fff7f}}
 .pferr{{color:#ff8080}}
+.pfwait{{color:#ffc66a}}
 .pfrow{{display:flex;justify-content:space-between;padding:2px 0;
         border-bottom:1px dotted #333}}
 .pfdetail{{font-size:11px;color:#ffb0a0;padding:1px 0 2px 12px;
@@ -583,22 +584,28 @@ function refreshPreflight() {{
     const list = document.getElementById('pflist');
     list.innerHTML = '';
     (d.items || []).forEach(it => {{
+      // Outdoor-only items (GPS fix, HOME) that haven't passed yet are
+      // 'waiting' rather than 'failing' — they cannot pass on a bench
+      // and the operator should not chase them. The arm gate still
+      // requires ok=true; this is a display affordance only, matching
+      // OperatorInputController._print_preflight stdin output.
+      const isWaiting = !it.ok && it.outdoor_only;
+      const cls = it.ok ? 'pfok' : (isWaiting ? 'pfwait' : 'pferr');
       const row = document.createElement('div');
       row.className = 'pfrow';
       const left = document.createElement('span');
-      left.textContent = it.name;
-      left.className = it.ok ? 'pfok' : 'pferr';
+      left.textContent = (isWaiting ? '[WAIT] ' : '') + it.name;
+      left.className = cls;
       // For failing items with a multi-part message (joined by '; ' —
       // see _check_params in safety/preflight.py), show only the
       // headline on the right and break each detail onto its own
-      // indented sub-line below. Matches what stdin operators see via
-      // OperatorInputController._print_preflight_breakdown so the two
-      // views stay coherent.
+      // indented sub-line below.
+      const headline = it.ok ? 'OK' : (isWaiting ? 'waiting (outdoor)' : (it.message || 'FAIL'));
       const msg = it.ok ? 'OK' : (it.message || 'FAIL');
-      const parts = (!it.ok && msg.includes('; ')) ? msg.split('; ') : [msg];
+      const parts = (!it.ok && msg.includes('; ')) ? msg.split('; ') : [headline];
       const right = document.createElement('span');
       right.textContent = parts[0];
-      right.className = it.ok ? 'pfok' : 'pferr';
+      right.className = cls;
       row.appendChild(left); row.appendChild(right);
       list.appendChild(row);
       // Indented detail rows for parts 1..N

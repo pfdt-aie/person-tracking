@@ -165,8 +165,49 @@ def test_to_dict_shape():
     pf = _pf()
     for item in pf.run():
         d = item.to_dict()
-        assert set(d.keys()) == {"name", "ok", "message"}
+        assert set(d.keys()) == {"name", "ok", "message", "outdoor_only"}
         assert isinstance(d["ok"], bool)
+        assert isinstance(d["outdoor_only"], bool)
+
+
+def test_only_gps_and_home_are_outdoor_only():
+    """Sprint F — exactly the two checks that physically cannot pass
+    indoors must be flagged outdoor_only. Everything else (param config,
+    sensor health, MAVLink link, etc.) is fixable on a bench."""
+    pf = _pf()
+    items = {c.name: c for c in pf.run()}
+    assert items["GPS fix OK"].outdoor_only is True
+    assert items["HOME position set"].outdoor_only is True
+    for other_name in (
+        "MAVLink connected",
+        "Heartbeat fresh",
+        "Flight mode = GUIDED",
+        "Vehicle ARMED",
+        "IMU / mag / baro healthy",
+        "RC transmitter connected",
+        "Geofence not breached",
+        "Battery above critical",
+        "ArduPilot params correct",
+    ):
+        assert items[other_name].outdoor_only is False, (
+            f"{other_name} should not be outdoor-only — it's fixable on a bench"
+        )
+
+
+def test_outdoor_only_failures_still_block_all_pass():
+    """SAFETY — the outdoor_only flag is a DISPLAY hint only. The arm
+    gate (all_pass) must still refuse takeoff when GPS or HOME is not
+    valid. Without this, a 'WAIT' marker could be misread as 'skip', and
+    operators could theoretically arm with no GPS lock."""
+    pf = _pf({"gps_fix": 0, "hdop": 99.0, "sats": 0,
+              "global_fresh": False, "gps_raw_fresh": False, "ekf_fresh": False,
+              "home": False})
+    items = {c.name: c for c in pf.run()}
+    assert items["GPS fix OK"].outdoor_only is True
+    assert items["GPS fix OK"].ok is False               # still a fail
+    assert items["HOME position set"].outdoor_only is True
+    assert items["HOME position set"].ok is False        # still a fail
+    assert pf.all_pass() is False                        # arm gate still refuses
 
 
 def test_param_failure_blocks_all_pass():

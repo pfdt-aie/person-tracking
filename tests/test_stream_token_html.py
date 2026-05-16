@@ -51,3 +51,26 @@ def test_preflight_breakdown_only_for_failing_items():
     html = StreamServer()._build_html().decode()
     # Guard condition prevents pfdetail rows on OK items.
     assert "!it.ok && msg.includes('; ')" in html
+
+
+def test_web_ui_renders_outdoor_only_with_pfwait_class():
+    """Sprint F — outdoor-only failures (GPS, HOME) must render with the
+    pfwait amber class, not pferr red. Stops the operator's eye from
+    treating laws-of-physics items as configuration bugs."""
+    html = StreamServer()._build_html().decode()
+    # CSS class is defined
+    assert ".pfwait" in html
+    # JS branch tests outdoor_only and routes to pfwait
+    assert "isWaiting = !it.ok && it.outdoor_only" in html
+    assert "pfwait" in html
+    # The label gets a [WAIT] prefix
+    assert "'[WAIT] '" in html
+
+
+def test_web_ui_outdoor_only_does_not_affect_arm_button_disable():
+    """SAFETY — the [WAIT] visual must not affect d.all_ok. The ARM
+    button is still disabled if any item is not ok, including outdoor-only
+    ones. Check the JS still uses d.all_ok untouched."""
+    html = StreamServer()._build_html().decode()
+    # The ARM button gating is unchanged.
+    assert "document.getElementById('armgo').disabled = !d.all_ok" in html

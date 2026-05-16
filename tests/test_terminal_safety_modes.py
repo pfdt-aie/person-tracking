@@ -624,3 +624,72 @@ def test_display_key_hint_does_not_alias_to_real_command():
     # would have side effects on the controller. It should not.
     c._print_unknown("t")
     arm_cb.assert_not_called()
+
+
+# ----------------------------------------------------------------------
+#  Sprint F — outdoor_only items render as [WAIT] not [FAIL]
+# ----------------------------------------------------------------------
+
+def test_preflight_renders_wait_for_outdoor_only_fails(capsys):
+    """Indoor-expected failures (GPS, HOME) render as [WAIT] so the
+    operator's eye is drawn to fixable issues, not the laws of physics."""
+    items = [
+        {"name": "MAVLink connected", "ok": True,  "message": "link up",
+         "outdoor_only": False},
+        {"name": "HOME position set", "ok": False, "message": "no HOME yet",
+         "outdoor_only": True},
+        {"name": "GPS fix OK",        "ok": False, "message": "fix=0<3",
+         "outdoor_only": True},
+        {"name": "Battery above critical", "ok": True, "message": "",
+         "outdoor_only": False},
+        {"name": "ArduPilot params correct", "ok": False,
+         "message": "FENCE_ENABLE: 0.0 == 1.0", "outdoor_only": False},
+    ]
+    c = _make_op(handle_preflight=lambda: items)
+    c._print_preflight()
+    out = capsys.readouterr().out
+
+    assert "[WAIT] HOME position set" in out
+    assert "[WAIT] GPS fix OK" in out
+    assert "[FAIL] ArduPilot params correct" in out   # real fail, not WAIT
+    assert "[OK]   MAVLink connected" in out
+    # Summary should mention the waiting items so it's clear they're
+    # expected on a bench.
+    assert "waiting on GPS/HOME" in out
+
+
+def test_preflight_summary_count_excludes_waiting(capsys):
+    """passed=N/M should reflect actually-OK items only. With 1 OK + 2
+    waiting + 0 fail in a 3-item list, the summary should say 1/3 with
+    a note that 2 are waiting."""
+    items = [
+        {"name": "MAVLink connected", "ok": True,  "message": "link up",
+         "outdoor_only": False},
+        {"name": "HOME position set", "ok": False, "message": "no HOME yet",
+         "outdoor_only": True},
+        {"name": "GPS fix OK",        "ok": False, "message": "fix=0<3",
+         "outdoor_only": True},
+    ]
+    c = _make_op(handle_preflight=lambda: items)
+    c._print_preflight()
+    out = capsys.readouterr().out
+
+    assert "passed=1/3" in out
+    assert "2 waiting" in out
+
+
+def test_preflight_no_outdoor_only_failures_keeps_existing_summary(capsys):
+    """If nothing is outdoor-waiting, the summary stays unchanged (no
+    'X waiting' tail). Backwards-compat for outdoor / live-flight runs."""
+    items = [
+        {"name": "MAVLink connected", "ok": True, "message": "",
+         "outdoor_only": False},
+        {"name": "GPS fix OK", "ok": True, "message": "fix=3 sats=14",
+         "outdoor_only": True},
+    ]
+    c = _make_op(handle_preflight=lambda: items)
+    c._print_preflight()
+    out = capsys.readouterr().out
+
+    assert "passed=2/2" in out
+    assert "waiting" not in out
