@@ -214,7 +214,7 @@ class PersonGimbalTracker:
             expand_search = self.expand_search,
             lissajous    = self.lissajous,
             handle_estop     = self._handle_estop,
-            handle_arm       = self._handle_arm,
+            handle_follow    = self._handle_follow,
             handle_takeoff   = self._handle_takeoff,
             handle_preflight = self._handle_preflight,
             handle_telemetry = self._handle_telemetry,
@@ -352,13 +352,13 @@ class PersonGimbalTracker:
         safe_event("estop", action=action, drone_enabled=self._drone_enabled)
         try:
             self._ts.tracking_enabled = False
-            # B2: emit the disarm event from here when E-STOP is what
-            # actually disarms the tracker. A subsequent operator
-            # 'disarm' command therefore won't double-log the same
-            # transition (see _handle_arm idempotency below).
-            if self._ts.drone_armed:
-                self._ts.drone_armed = False
-                safe_event("disarm", reason="estop", action=action)
+            # B2: emit the unfollow event from here when E-STOP is what
+            # actually stops body-follow. A subsequent operator
+            # 'unfollow' command therefore won't double-log the same
+            # transition (see _handle_follow idempotency below).
+            if self._ts.drone_following:
+                self._ts.drone_following = False
+                safe_event("unfollow", reason="estop", action=action)
             self.drone_ctrl.reset()
             # B3: stop manual gimbal motion. Without this an operator
             # mid-'pan 50' in MANUAL mode would keep panning after the
@@ -390,10 +390,10 @@ class PersonGimbalTracker:
         }
 
     def _stop_drone_body_autonomy(self, reason: str) -> None:
-        """Disable body-following until the operator explicitly arms again."""
-        if self._ts.drone_armed:
-            print(f"[Arm] Drone-body tracker DISARMED by {reason}")
-        self._ts.drone_armed = False
+        """Disable body-following until the operator explicitly follows again."""
+        if self._ts.drone_following:
+            print(f"[Follow] Drone-body following STOPPED by {reason}")
+        self._ts.drone_following = False
         try:
             self.drone_ctrl.reset()
         except Exception as exc:
@@ -440,51 +440,56 @@ class PersonGimbalTracker:
         """Return the live preflight checklist as a list of dicts."""
         return [item.to_dict() for item in self.preflight.run()]
 
-    def _handle_arm(self, on) -> dict:
-        """Arm or disarm the drone-body tracker.
+    def _handle_follow(self, on) -> dict:
+        """Enable or stop drone-body following of the locked person.
+
+        This is the tracker-side authority gate — distinct from FCU arming
+        (which the RC pilot does via the sticks gesture). Renamed from
+        `_handle_follow` to remove the FCU-arm collision that confused
+        operators in earlier field tests.
 
         Args:
-            on: True to arm, False to disarm, None to query current state.
+            on: True to start following, False to stop, None to query current state.
 
         Returns:
-            {"armed": bool, "status": "ok"|"error", "msg": str, "items": [...]}.
-            Refuses to arm if any preflight item is failing or --drone was
-            not specified at launch.
+            {"following": bool, "status": "ok"|"error", "msg": str, "items": [...]}.
+            Refuses to start following if any preflight item is failing or
+            --drone was not specified at launch.
         """
         if on is None:
-            return {"armed": bool(self._ts.drone_armed), "status": "ok", "msg": ""}
+            return {"following": bool(self._ts.drone_following), "status": "ok", "msg": ""}
 
         if not on:
-            # B2: idempotent disarm. Only print + log when actually
-            # transitioning from armed → disarmed, so repeated 'disarm'
-            # commands (or a 'disarm' after an E-STOP that already
-            # disarmed) don't pollute the flight log with phantom events.
-            was_armed = self._ts.drone_armed
-            self._ts.drone_armed = False
-            if was_armed:
-                print("[Arm] Drone-body tracker DISARMED by operator")
-                safe_event("disarm", source="operator")
-                return {"armed": False, "status": "ok", "msg": "disarmed"}
-            return {"armed": False, "status": "ok", "msg": "already disarmed"}
+            # B2: idempotent unfollow. Only print + log when actually
+            # transitioning from following → stopped, so repeated 'unfollow'
+            # commands (or an 'unfollow' after an E-STOP that already
+            # stopped) don't pollute the flight log with phantom events.
+            was_following = self._ts.drone_following
+            self._ts.drone_following = False
+            if was_following:
+                print("[Follow] Drone-body following STOPPED by operator")
+                safe_event("unfollow", source="operator")
+                return {"following": False, "status": "ok", "msg": "stopped"}
+            return {"following": False, "status": "ok", "msg": "already stopped"}
 
         if not self._drone_enabled:
-            return {"armed": False, "status": "error",
+            return {"following": False, "status": "error",
                     "msg": "tracker launched without --drone"}
 
         items = self.preflight.run()
         if not all(c.ok for c in items):
             failing = ", ".join(c.name for c in items if not c.ok)
-            return {"armed": False, "status": "error",
+            return {"following": False, "status": "error",
                     "msg": f"preflight failing: {failing}",
                     "items": [c.to_dict() for c in items]}
 
-        # Successful arm clears the RC-override latch (S3.6) so the controller
-        # can resume issuing commands.
+        # Successfully enabling follow clears the RC-override latch (S3.6)
+        # so the controller can resume issuing commands.
         self.mav.clear_rc_override()
-        self._ts.drone_armed = True
-        print("[Arm] Drone-body tracker ARMED — preflight all green")
-        safe_event("arm", checks_passed=len(items))
-        return {"armed": True, "status": "ok", "msg": "armed",
+        self._ts.drone_following = True
+        print("[Follow] Drone-body following ENABLED — preflight all green")
+        safe_event("follow", checks_passed=len(items))
+        return {"following": True, "status": "ok", "msg": "following",
                 "items": [c.to_dict() for c in items]}
 
     def _handle_takeoff(self, altitude_m: Optional[float] = None) -> dict:
@@ -497,10 +502,10 @@ class PersonGimbalTracker:
         Returns:
             ``{"status": "ok"|"error", "msg": str, "altitude_m": float,
             "items": [...]}``. ``items`` is included on preflight
-            failure to mirror ``_handle_arm``.
+            failure to mirror ``_handle_follow``.
 
         Refuses unless ``--drone`` was passed, preflight passes, and
-        the FCU reports LANDED. Same preflight gate as ``_handle_arm``
+        the FCU reports LANDED. Same preflight gate as ``_handle_follow``
         — covers MAVLink link, ARMED, GUIDED, HOME, GPS, sensors,
         battery, RC link, params, and fence. (Preflight intentionally
         skips ARMED/GUIDED in ``--ground-test`` so bench rehearsal
@@ -579,7 +584,7 @@ class PersonGimbalTracker:
         import time as _t
         out: dict = {
             "drone_enabled": bool(self._drone_enabled),
-            "drone_armed":   bool(self._ts.drone_armed),
+            "drone_following":   bool(self._ts.drone_following),
             "mode_tracker":  str(self._ts.mode),
         }
         try:
@@ -681,7 +686,7 @@ class PersonGimbalTracker:
             self.stream.set_gimbal_callback(self._web_ctrl.handle_gimbal)
             self.stream.set_estop_callback(self._handle_estop)
             self.stream.set_preflight_callback(self._handle_preflight)
-            self.stream.set_arm_callback(self._handle_arm)
+            self.stream.set_follow_callback(self._handle_follow)
             self.stream.set_takeoff_callback(self._handle_takeoff)
             self.stream.set_telemetry_callback(self._handle_telemetry)
         self._stream_thread = threading.Thread(
@@ -829,7 +834,7 @@ class PersonGimbalTracker:
                             target_info            = target_info,
                             drone_tracking_enabled = (
                                 ts.tracking_enabled
-                                and ts.drone_armed         # S1.3 preflight gate
+                                and ts.drone_following         # S1.3 preflight gate
                                 and ts.mode == "AUTO"
                             ),
                         )

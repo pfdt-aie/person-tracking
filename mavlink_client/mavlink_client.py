@@ -771,10 +771,10 @@ class MAVLinkClient:
             return self._rc_override_latched
 
     def clear_rc_override(self) -> None:
-        """Release the RC-override latch (called by /arm_tracker re-arm)."""
+        """Release the RC-override latch (called by /follow re-enable)."""
         with self._lock:
             if self._rc_override_latched:
-                print("[MAVLink] RC override latch cleared (operator re-armed)")
+                print("[MAVLink] RC override latch cleared (operator re-enabled follow)")
             self._rc_override_latched = False
 
     def is_sensors_healthy(self) -> bool:

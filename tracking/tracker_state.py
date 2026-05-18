@@ -30,12 +30,17 @@ class TrackerState:
     tracking_enabled: bool = True
     search_enabled:   bool = True
 
-    # --- S1.3: drone-body arming gate ---
-    # The gimbal can run freely; the drone body must be explicitly armed
-    # by the operator after a passing preflight check. Starts False even
-    # in --drone mode so velocity commands can never go out before the
-    # operator confirms readiness.
-    drone_armed: bool = False
+    # --- S1.3: drone-body follow gate ---
+    # The gimbal can run freely; drone-body following must be explicitly
+    # enabled by the operator (`follow` command) after a passing preflight
+    # check. Starts False even in --drone mode so velocity commands can
+    # never go out before the operator confirms readiness.
+    #
+    # Renamed from `drone_armed` to remove the FCU-arm collision that
+    # confused operators in field tests: FCU-armed is what the RC pilot
+    # does with the sticks gesture; drone_following is the tracker's
+    # software authority to send velocity setpoints.
+    drone_following: bool = False
 
     # --- Manual gimbal commands (operator-driven) ---
     manual_yaw_speed:    int   = 0

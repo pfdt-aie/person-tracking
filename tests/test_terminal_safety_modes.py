@@ -2,7 +2,7 @@
 
 Also covers SSH stdin verbs added in the operator_input.py SSH-parity
 sprint (Phases 3–5): the helpers (_print_help / _print_status /
-_print_preflight), the arm/disarm/estop wrappers (_handle_stdin_arm /
+_print_preflight), the arm/disarm/estop wrappers (_handle_stdin_follow /
 _handle_stdin_estop), the shared toggle helpers, and the
 track-id-vs-track-on/off disambiguation inside _stdin_loop.
 """
@@ -68,7 +68,7 @@ class _FakeGsm:
 def _tracker():
     t = PersonGimbalTracker.__new__(PersonGimbalTracker)
     t._drone_enabled = True
-    t._ts = TrackerState(drone_armed=True)
+    t._ts = TrackerState(drone_following=True)
     t.mav = _FakeMav()
     t.drone_ctrl = _FakeDroneController()
     t._gsm = _FakeGsm()
@@ -83,7 +83,7 @@ def test_mode_land_disarms_body_before_land():
     t = _tracker()
     result = t._request_land()
     assert result["status"] == "ok"
-    assert t._ts.drone_armed is False
+    assert t._ts.drone_following is False
     assert t.drone_ctrl.reset_calls == 1
     assert t.mav.calls == ["zero", "land"]
 
@@ -92,7 +92,7 @@ def test_mode_rtl_disarms_body_before_rtl():
     t = _tracker()
     result = t._request_rtl()
     assert result["status"] == "ok"
-    assert t._ts.drone_armed is False
+    assert t._ts.drone_following is False
     assert t.drone_ctrl.reset_calls == 1
     assert t.mav.calls == ["zero", "rtl"]
 
@@ -101,7 +101,7 @@ def test_mode_brake_disarms_body_before_brake():
     t = _tracker()
     result = t._request_brake()
     assert result["status"] == "ok"
-    assert t._ts.drone_armed is False
+    assert t._ts.drone_following is False
     assert t.drone_ctrl.reset_calls == 1
     assert t.mav.calls == ["zero", "brake"]
 
@@ -109,7 +109,7 @@ def test_mode_brake_disarms_body_before_brake():
 def test_manual_mode_sends_zero_velocity_and_requires_rearm():
     t = _tracker()
     t._enter_manual()
-    assert t._ts.drone_armed is False
+    assert t._ts.drone_following is False
     assert t._ts.mode == "MANUAL"
     assert t._ts.state == State.WAITING
     assert t.mav.calls == ["zero"]
@@ -148,56 +148,56 @@ def test_estop_zeroes_manual_gimbal_speeds_and_calls_ctrl_stop(monkeypatch):
     assert t.ctrl.stop.called
 
 
-def test_estop_logs_disarm_event_with_reason(monkeypatch):
-    """B2: when E-STOP disarms the tracker it emits a disarm event itself."""
+def test_estop_logs_unfollow_event_with_reason(monkeypatch):
+    """B2: when E-STOP stops body-follow it emits an unfollow event itself."""
     log = _patch_flight_log(monkeypatch)
-    t = _tracker()    # starts armed
+    t = _tracker()    # starts following
     t._handle_estop("brake")
     names = [name for name, _ in log.events]
     assert "estop" in names
-    assert "disarm" in names
-    disarm = next(fields for name, fields in log.events if name == "disarm")
-    assert disarm.get("reason") == "estop"
-    assert disarm.get("action") == "brake"
+    assert "unfollow" in names
+    unfollow = next(fields for name, fields in log.events if name == "unfollow")
+    assert unfollow.get("reason") == "estop"
+    assert unfollow.get("action") == "brake"
 
 
-def test_estop_when_already_disarmed_does_not_log_disarm(monkeypatch):
-    """B2: idempotent — no spurious disarm event when nothing changes."""
+def test_estop_when_already_stopped_does_not_log_unfollow(monkeypatch):
+    """B2: idempotent — no spurious unfollow event when nothing changes."""
     log = _patch_flight_log(monkeypatch)
     t = _tracker()
-    t._ts.drone_armed = False     # already disarmed
+    t._ts.drone_following = False     # already stopped
     t._handle_estop("brake")
-    disarm_events = [e for e in log.events if e[0] == "disarm"]
-    assert disarm_events == []
+    unfollow_events = [e for e in log.events if e[0] == "unfollow"]
+    assert unfollow_events == []
 
 
-def test_disarm_after_estop_does_not_double_log(monkeypatch):
-    """B2: the operator's follow-up 'disarm' on an already-disarmed
-    tracker must not emit a second disarm event."""
+def test_unfollow_after_estop_does_not_double_log(monkeypatch):
+    """B2: the operator's follow-up 'unfollow' on an already-stopped
+    tracker must not emit a second unfollow event."""
     log = _patch_flight_log(monkeypatch)
     t = _tracker()
-    t.preflight = MagicMock()    # _handle_arm only consults preflight when arming
-    # First action: E-STOP disarms and logs one disarm with reason=estop.
+    t.preflight = MagicMock()    # _handle_follow only consults preflight when enabling
+    # First action: E-STOP stops follow and logs one unfollow with reason=estop.
     t._handle_estop("brake")
-    disarms_after_estop = [e for e in log.events if e[0] == "disarm"]
-    assert len(disarms_after_estop) == 1
-    # Operator now types 'disarm' — should be a no-op, no new event.
-    result = t._handle_arm(False)
+    unfollow_after_estop = [e for e in log.events if e[0] == "unfollow"]
+    assert len(unfollow_after_estop) == 1
+    # Operator now types 'unfollow' — should be a no-op, no new event.
+    result = t._handle_follow(False)
     assert result["status"] == "ok"
-    assert result["msg"] == "already disarmed"
-    disarms_total = [e for e in log.events if e[0] == "disarm"]
-    assert len(disarms_total) == 1, log.events
+    assert result["msg"] == "already stopped"
+    unfollow_total = [e for e in log.events if e[0] == "unfollow"]
+    assert len(unfollow_total) == 1, log.events
 
 
-def test_handle_arm_disarm_emits_event_when_transitioning(monkeypatch):
-    """Sanity: when 'disarm' actually transitions armed → disarmed, log fires."""
+def test_handle_follow_unfollow_emits_event_when_transitioning(monkeypatch):
+    """Sanity: when 'unfollow' actually transitions following → stopped, log fires."""
     log = _patch_flight_log(monkeypatch)
-    t = _tracker()    # starts armed
-    result = t._handle_arm(False)
-    assert result["msg"] == "disarmed"
-    disarms = [e for e in log.events if e[0] == "disarm"]
-    assert len(disarms) == 1
-    assert disarms[0][1].get("source") == "operator"
+    t = _tracker()    # starts following
+    result = t._handle_follow(False)
+    assert result["msg"] == "stopped"
+    unfollow = [e for e in log.events if e[0] == "unfollow"]
+    assert len(unfollow) == 1
+    assert unfollow[0][1].get("source") == "operator"
 
 
 # ----------------------------------------------------------------------
@@ -207,7 +207,7 @@ def test_handle_arm_disarm_emits_event_when_transitioning(monkeypatch):
 def _make_op(
     *,
     handle_estop=None,
-    handle_arm=None,
+    handle_follow=None,
     handle_preflight=None,
     handle_telemetry=None,
     state=None,
@@ -226,7 +226,7 @@ def _make_op(
         reset_all=MagicMock(),
         search=MagicMock(), init_scan=MagicMock(),
         expand_search=MagicMock(), lissajous=MagicMock(),
-        handle_estop=handle_estop, handle_arm=handle_arm,
+        handle_estop=handle_estop, handle_follow=handle_follow,
         handle_preflight=handle_preflight, handle_telemetry=handle_telemetry,
     )
 
@@ -296,37 +296,37 @@ def test_preflight_without_callback_refuses(capsys):
     assert "unavailable" in capsys.readouterr().out
 
 
-# ---- _handle_stdin_arm -----------------------------------------------
+# ---- _handle_stdin_follow -----------------------------------------------
 
-def test_arm_invokes_handler_with_true_and_prints_armed(capsys):
-    cb = MagicMock(return_value={"status": "ok", "armed": True, "msg": "ready"})
-    c = _make_op(handle_arm=cb)
-    c._handle_stdin_arm(True)
+def test_follow_invokes_handler_with_true_and_prints_following(capsys):
+    cb = MagicMock(return_value={"status": "ok", "following": True, "msg": "ready"})
+    c = _make_op(handle_follow=cb)
+    c._handle_stdin_follow(True)
     cb.assert_called_once_with(True)
-    assert "ARMED" in capsys.readouterr().out
+    assert "FOLLOWING" in capsys.readouterr().out
 
 
-def test_disarm_invokes_handler_with_false_and_prints_disarmed(capsys):
-    cb = MagicMock(return_value={"status": "ok", "armed": False, "msg": ""})
-    c = _make_op(handle_arm=cb)
-    c._handle_stdin_arm(False)
+def test_unfollow_invokes_handler_with_false_and_prints_stopped(capsys):
+    cb = MagicMock(return_value={"status": "ok", "following": False, "msg": ""})
+    c = _make_op(handle_follow=cb)
+    c._handle_stdin_follow(False)
     cb.assert_called_once_with(False)
-    assert "DISARMED" in capsys.readouterr().out
+    assert "FOLLOW STOPPED" in capsys.readouterr().out
 
 
-def test_arm_refused_when_preflight_fails(capsys):
-    cb = MagicMock(return_value={"status": "error", "armed": False,
+def test_follow_refused_when_preflight_fails(capsys):
+    cb = MagicMock(return_value={"status": "error", "following": False,
                                   "msg": "preflight failing: GPS"})
-    c = _make_op(handle_arm=cb)
-    c._handle_stdin_arm(True)
+    c = _make_op(handle_follow=cb)
+    c._handle_stdin_follow(True)
     out = capsys.readouterr().out
-    assert "arm refused" in out
+    assert "follow refused" in out
     assert "preflight failing" in out
 
 
-def test_arm_without_handler_refuses(capsys):
+def test_follow_without_handler_refuses(capsys):
     c = _make_op()
-    c._handle_stdin_arm(True)
+    c._handle_stdin_follow(True)
     out = capsys.readouterr().out
     assert "unavailable" in out and "--drone" in out
 
@@ -466,18 +466,31 @@ def test_stdin_bare_mode_prints_current(capsys, monkeypatch):
     assert "mode=" in out
 
 
-def test_stdin_arm_routes_to_handler(monkeypatch):
-    cb = MagicMock(return_value={"status": "ok", "armed": True, "msg": ""})
-    c = _make_op(handle_arm=cb)
-    _drive_stdin(monkeypatch, c, ["arm"])
+def test_stdin_follow_routes_to_handler(monkeypatch):
+    cb = MagicMock(return_value={"status": "ok", "following": True, "msg": ""})
+    c = _make_op(handle_follow=cb)
+    _drive_stdin(monkeypatch, c, ["follow"])
     cb.assert_called_with(True)
 
 
-def test_stdin_disarm_routes_to_handler(monkeypatch):
-    cb = MagicMock(return_value={"status": "ok", "armed": False, "msg": ""})
-    c = _make_op(handle_arm=cb)
-    _drive_stdin(monkeypatch, c, ["disarm"])
+def test_stdin_unfollow_routes_to_handler(monkeypatch):
+    cb = MagicMock(return_value={"status": "ok", "following": False, "msg": ""})
+    c = _make_op(handle_follow=cb)
+    _drive_stdin(monkeypatch, c, ["unfollow"])
     cb.assert_called_with(False)
+
+
+def test_stdin_old_arm_word_returns_unknown_with_rename_hint(monkeypatch, capsys):
+    """The pre-rename word `arm` must NOT silently map to follow — a stray
+    `arm` keypress shouldn't accidentally start drone-body following. It
+    should return `unknown` with a hint pointing at the new word."""
+    cb = MagicMock()
+    c = _make_op(handle_follow=cb)
+    _drive_stdin(monkeypatch, c, ["arm"])
+    cb.assert_not_called()
+    out = capsys.readouterr().out
+    assert "unknown" in out
+    assert "follow" in out   # the hint points to the new word
 
 
 def test_stdin_estop_routes_with_double_tap(monkeypatch):
@@ -524,7 +537,7 @@ def test_stdin_handler_exception_does_not_kill_loop(monkeypatch, capsys):
 
     We monkeypatch a helper that has no inner try/except (_toggle_tracking)
     so the failure bubbles to the new outer guard rather than being
-    swallowed by per-verb wrappers like _handle_stdin_arm.
+    swallowed by per-verb wrappers like _handle_stdin_follow.
     """
     calls = {"n": 0}
     def flaky(*a, **kw):
@@ -561,13 +574,13 @@ def test_arm_refused_renders_each_failing_item_on_its_own_line(capsys):
              "message": "2 failing — FENCE_ENABLE: 0.0 == 1.0; SR1_RC_CHAN: 0.0 == 5.0"},
         ],
     }
-    c = _make_op(handle_arm=MagicMock(return_value=refused))
-    c._handle_stdin_arm(True)
+    c = _make_op(handle_follow=MagicMock(return_value=refused))
+    c._handle_stdin_follow(True)
     out = capsys.readouterr().out
-    assert "arm refused" in out
+    assert "follow refused" in out
     assert "2 preflight item(s) failing" in out
-    assert "Vehicle ARMED" in out
-    assert "FCU reports disarmed" in out
+    assert "Vehicle ARMED" in out                 # preflight item name (FCU concept — unchanged)
+    assert "FCU reports disarmed" in out          # FCU-side message (unchanged)
     # First param appears on the parent line, the rest are indented.
     assert "FENCE_ENABLE" in out
     assert "SR1_RC_CHAN" in out
@@ -575,14 +588,14 @@ def test_arm_refused_renders_each_failing_item_on_its_own_line(capsys):
     assert "MAVLink connected" not in out
 
 
-def test_arm_success_does_not_render_breakdown(capsys):
-    """The breakdown is only for the refused path — a successful arm
+def test_follow_success_does_not_render_breakdown(capsys):
+    """The breakdown is only for the refused path — a successful follow
     must not spew the (empty) failing-items list."""
-    ok = {"status": "ok", "armed": True, "msg": "armed", "items": []}
-    c = _make_op(handle_arm=MagicMock(return_value=ok))
-    c._handle_stdin_arm(True)
+    ok = {"status": "ok", "following": True, "msg": "following", "items": []}
+    c = _make_op(handle_follow=MagicMock(return_value=ok))
+    c._handle_stdin_follow(True)
     out = capsys.readouterr().out
-    assert "ARMED" in out
+    assert "FOLLOWING" in out
     assert "preflight item(s) failing" not in out
 
 
@@ -619,7 +632,7 @@ def test_display_key_hint_does_not_alias_to_real_command():
     A stray 't' while armed must not toggle tracking off."""
     arm_cb = MagicMock()
     track_cb = MagicMock()
-    c = _make_op(handle_arm=arm_cb)
+    c = _make_op(handle_follow=arm_cb)
     # If 't' were aliased to anything, calling _print_unknown('t')
     # would have side effects on the controller. It should not.
     c._print_unknown("t")

@@ -409,7 +409,8 @@ mode manual     Manual gimbal mode; stops body-following
 mode brake      Stop body-following and send BRAKE
 mode land       Stop body-following and send LAND
 mode rtl        Stop body-following and send RTL / return-to-home
-arm / disarm    Arm or disarm the drone-body tracker (preflight gated)
+follow          Enable drone-body following (preflight all-green required)
+unfollow        Stop drone-body following (tracker only; FCU mode unchanged)
 takeoff [alt]   Command FCU takeoff to alt m AGL (default 7); preflight + armed + landed gated
 estop           BRAKE; press again within 3 s for LAND
 q               Quit
@@ -482,7 +483,7 @@ Every rule is enforced before any MAVLink command leaves the Jetson.
 | **FPS floor** | Body holds when effective FPS < 8 |
 | **Session timer** | Auto RTL after `MAX_FLIGHT_TIME_S = 600 s` |
 | **Retreat + hysteresis** | 1 m/s active retreat when sep < 4 m · resume above 5.5 m |
-| **RC override** | GUIDED → other mode latches · cleared only by re-arm after preflight |
+| **RC override** | GUIDED → other mode latches · cleared only by re-`follow` after preflight |
 | **Software E-STOP** | Web button + Space key · BRAKE → LAND escalation |
 | **Readiness banner** | Web UI shows `SAFE TO FOLLOW`, `HOLDING`, or `PILOT ACTION REQUIRED` from live telemetry |
 
@@ -583,8 +584,9 @@ FENCE_ALT_MIN = 10
 
 </div>
 
-JSONL events emitted: `arm`, `disarm`, `takeoff`, `estop`, `mode_change`, `rc_override`,
-`session_rtl`, `fps_floor`, `safety_warning`, `log_open`.
+JSONL events emitted: `follow`, `unfollow`, `takeoff`, `estop`, `mode_change`, `rc_override`,
+`session_rtl`, `fps_floor`, `safety_warning`, `log_open`. (Pre-2026-05-16 logs
+emit `arm` / `disarm` for the same events — renamed to remove the FCU-arm collision.)
 
 ---
 

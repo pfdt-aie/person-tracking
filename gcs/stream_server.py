@@ -36,7 +36,7 @@ from config.settings import Settings, load_settings
 # /estop is intentionally NOT in this set: it must always be reachable
 # regardless of token state. Life safety overrides auth.
 _CONTROL_PATHS = {'/click', '/unlock', '/mode', '/gimbal',
-                  '/zoom_in', '/zoom_out', '/arm_tracker', '/takeoff'}
+                  '/zoom_in', '/zoom_out', '/follow', '/takeoff'}
 
 # Double-tap window for E-STOP → LAND escalation (seconds)
 _ESTOP_DOUBLE_TAP_S = 3.0
@@ -85,7 +85,7 @@ class StreamServer:
         self._estop_last_t   = 0.0
         self._estop_last_action = ""
         self._preflight_cb = None   # callable() → list[dict] (per safety.PreflightCheck)
-        self._arm_cb       = None   # callable(on: bool) → dict
+        self._follow_cb    = None   # callable(on: bool) → dict (was: _arm_cb)
         self._takeoff_cb   = None   # callable(alt_m: Optional[float]) → dict
         self._telemetry_cb = None   # callable() → dict (S3.1)
 
@@ -139,19 +139,23 @@ class StreamServer:
     def set_gimbal_callback(self, cb) -> None:
         self._gimbal_cb = cb
 
-    def _is_armed(self) -> bool:
-        """Best-effort read of current drone-armed state for UI sync.
+    def _is_following(self) -> bool:
+        """Best-effort read of current drone-body-following state for UI sync.
 
-        Calls the arm callback with on=None (a query) if it accepts it,
-        otherwise returns False. The arm callback handler accepts the
+        Calls the follow callback with on=None (a query) if it accepts it,
+        otherwise returns False. The follow callback handler accepts the
         None sentinel and returns the current state without mutating.
+
+        Renamed from `_is_armed` to remove the FCU-arm collision —
+        `_is_armed` historically meant "is the tracker authorised to send
+        velocity?", easily confused with FCU-armed (motors enabled).
         """
-        cb = self._arm_cb
+        cb = self._follow_cb
         if cb is None:
             return False
         try:
             result = cb(None)
-            return bool(result.get("armed", False))
+            return bool(result.get("following", False))
         except Exception:
             return False
 
@@ -164,14 +168,17 @@ class StreamServer:
         """
         self._preflight_cb = cb
 
-    def set_arm_callback(self, cb) -> None:
-        """Wire the drone-body arm handler.
+    def set_follow_callback(self, cb) -> None:
+        """Wire the drone-body follow handler.
 
         Args:
             cb: callable(on: bool) → dict. Implementation must refuse to
                 set on=True unless all preflight items pass.
+
+        Renamed from `set_arm_callback`; the underlying handler's return
+        dict now uses 'following' instead of 'armed' as the state key.
         """
-        self._arm_cb = cb
+        self._follow_cb = cb
 
     def set_takeoff_callback(self, cb) -> None:
         """Wire the takeoff handler used by /takeoff?alt=N.
@@ -189,7 +196,7 @@ class StreamServer:
         Args:
             cb: zero-arg callable returning a dict merged into /status.
                 Should include mode, gps_fix/hdop/sats, battery_v, fence,
-                ekf_healthy, drone_armed, tracking_loss_s, fps, rc_override.
+                ekf_healthy, drone_following, tracking_loss_s, fps, rc_override.
         """
         self._telemetry_cb = cb
 
@@ -270,10 +277,10 @@ body{{display:flex;flex-direction:column;font-family:monospace;color:#ddd}}
 #ubtn{{margin-left:auto;background:#550000;color:#ffaaaa;border:1px solid #a00;
        padding:2px 10px;border-radius:4px;cursor:pointer;font-size:11px}}
 #ubtn:hover{{background:#880000}}
-#armbtn{{background:#222244;color:#ccccff;border:1px solid #4444aa;
-         padding:2px 10px;border-radius:4px;cursor:pointer;font-size:11px;font-weight:bold}}
-#armbtn:hover{{background:#333366}}
-#armbtn.armed{{background:#226600;color:#ddffdd;border:1px solid #5acc5a}}
+#followbtn{{background:#222244;color:#ccccff;border:1px solid #4444aa;
+            padding:2px 10px;border-radius:4px;cursor:pointer;font-size:11px;font-weight:bold}}
+#followbtn:hover{{background:#333366}}
+#followbtn.following{{background:#226600;color:#ddffdd;border:1px solid #5acc5a}}
 #pfpanel{{position:absolute;top:34px;right:140px;z-index:20;
          background:rgba(0,0,0,.92);border:1px solid #444;
          padding:10px 14px;border-radius:6px;min-width:280px;
@@ -287,19 +294,19 @@ body{{display:flex;flex-direction:column;font-family:monospace;color:#ddd}}
 .pfdetail{{font-size:11px;color:#ffb0a0;padding:1px 0 2px 12px;
            border-bottom:1px dotted #222;line-height:1.35}}
 .pfdetail::before{{content:"\\21B3  ";color:#666}}
-#armgo{{background:#226600;color:#fff;border:1px solid #5acc5a;
-       padding:4px 10px;cursor:pointer;border-radius:4px;font-weight:bold}}
-#armgo:hover{{background:#338833}}
-#armgo:disabled{{opacity:.4;cursor:not-allowed}}
-#disarmgo{{margin-left:6px;background:#552200;color:#ffcc99;border:1px solid #aa6633;
-          padding:4px 10px;cursor:pointer;border-radius:4px}}
-#disarmgo:hover{{background:#774400}}
+#startfollow{{background:#226600;color:#fff;border:1px solid #5acc5a;
+              padding:4px 10px;cursor:pointer;border-radius:4px;font-weight:bold}}
+#startfollow:hover{{background:#338833}}
+#startfollow:disabled{{opacity:.4;cursor:not-allowed}}
+#stopfollow{{margin-left:6px;background:#552200;color:#ffcc99;border:1px solid #aa6633;
+             padding:4px 10px;cursor:pointer;border-radius:4px}}
+#stopfollow:hover{{background:#774400}}
 #estop{{background:#aa0000;color:#fff;border:2px solid #ff5555;
         padding:4px 16px;border-radius:4px;cursor:pointer;
         font-size:14px;font-weight:bold;letter-spacing:1px;
         box-shadow:0 0 8px rgba(255,0,0,.6);animation:estoppulse 1.6s infinite}}
 #estop:hover{{background:#ff0000}}
-#estop.armed{{background:#ff3300;animation:none}}
+#estop.primed{{background:#ff3300;animation:none}}
 .safeact{{background:#2a1a00;color:#ffd080;border:1px solid #aa6600;
           padding:3px 8px;border-radius:4px;cursor:pointer;font-size:11px;
           font-weight:bold}}
@@ -352,7 +359,7 @@ canvas{{max-width:100%;max-height:100%;display:block;cursor:crosshair}}
   <button class="zbtn" onclick="doZoom('out')" title="Zoom Out">O</button>
   <button id="qbtn"  onclick="toggleQuality()" title="Switch HD/SD quality">HD</button>
   <button id="ubtn" onclick="doUnlock()">UNLOCK</button>
-  <button id="armbtn" onclick="togglePreflight()" title="Preflight checklist + arm tracker">ARM ▾</button>
+  <button id="followbtn" onclick="togglePreflight()" title="Preflight checklist + start drone-body following">FOLLOW ▾</button>
   <button id="estop" onclick="doEstop()" title="Emergency stop — first press BRAKE, second LAND, or Space">E-STOP</button>
   <button class="safeact" onclick="doSafetyMode('brake')" title="BRAKE mode">BRAKE</button>
   <button class="safeact land" onclick="doSafetyMode('land')" title="LAND mode">LAND</button>
@@ -360,8 +367,8 @@ canvas{{max-width:100%;max-height:100%;display:block;cursor:crosshair}}
 </div>
 <div id="pfpanel" style="display:none">
   <div id="pflist"></div>
-  <button id="armgo" onclick="doArm()">Arm Tracker</button>
-  <button id="disarmgo" onclick="doDisarm()">Stop Follow</button>
+  <button id="startfollow" onclick="doFollow()">Start Following</button>
+  <button id="stopfollow" onclick="doUnfollow()">Stop Following</button>
 </div>
 <div id="wrap">
   <canvas id="c" width="{_STREAM_W_HI}" height="{_STREAM_H_HI}"></canvas>
@@ -487,7 +494,7 @@ function syncReadiness(d) {{
     (d.tracking_loss_s != null && d.tracking_loss_s >= 5.0)
   );
   const following = (
-    d.drone_armed &&
+    d.drone_following &&
     d.mode_tracker === 'AUTO' &&
     d.mode_fcu === 'GUIDED' &&
     d.armed_fcu &&
@@ -616,20 +623,20 @@ function refreshPreflight() {{
         list.appendChild(det);
       }}
     }});
-    document.getElementById('armgo').disabled = !d.all_ok;
-    const btn = document.getElementById('armbtn');
-    btn.classList.toggle('armed', !!d.armed);
-    btn.textContent = (d.armed ? 'ARMED ▾' : 'ARM ▾');
+    document.getElementById('startfollow').disabled = !d.all_ok;
+    const btn = document.getElementById('followbtn');
+    btn.classList.toggle('following', !!d.following);
+    btn.textContent = (d.following ? 'FOLLOWING ▾' : 'FOLLOW ▾');
   }}).catch(() => {{}});
 }}
-function doArm() {{
-  fetch(ctlUrl('/arm_tracker?on=true')).then(r => r.json()).then(d => {{
-    showToast(d.status === 'ok' ? 'Tracker ARMED' : ('Arm refused: ' + (d.msg || '')), d.status !== 'ok');
+function doFollow() {{
+  fetch(ctlUrl('/follow?on=true')).then(r => r.json()).then(d => {{
+    showToast(d.status === 'ok' ? 'Drone FOLLOWING' : ('Follow refused: ' + (d.msg || '')), d.status !== 'ok');
     refreshPreflight();
-  }}).catch(() => showToast('Arm request failed', true));
+  }}).catch(() => showToast('Follow request failed', true));
 }}
-function doDisarm() {{
-  fetch(ctlUrl('/arm_tracker?on=false')).then(r => r.json()).then(d => {{
+function doUnfollow() {{
+  fetch(ctlUrl('/follow?on=false')).then(r => r.json()).then(d => {{
     showToast('Follow STOPPED', false);
     refreshPreflight();
   }}).catch(() => showToast('Stop request failed', true));
@@ -648,15 +655,15 @@ function doSafetyMode(mode) {{
 // Always reachable (no token check), also bound to Space key for fast access.
 function doEstop() {{
   const btn = document.getElementById('estop');
-  btn.classList.add('armed');
+  btn.classList.add('primed');
   fetch('/estop').then(r => r.json()).then(d => {{
     const a = (d.action || 'brake').toUpperCase();
     showToast('E-STOP → ' + a + (d.status === 'ok' ? '' : ' (' + (d.msg || 'check fcu') + ')'),
               d.status !== 'ok');
-    setTimeout(() => btn.classList.remove('armed'), 2500);
+    setTimeout(() => btn.classList.remove('primed'), 2500);
   }}).catch(() => {{
     showToast('E-STOP request failed — try again or use RC', true);
-    btn.classList.remove('armed');
+    btn.classList.remove('primed');
   }});
 }}
 window.addEventListener('keydown', e => {{
@@ -833,14 +840,14 @@ async function runStream() {{
                 elif route == '/preflight':
                     cb = server_ref._preflight_cb
                     items = cb() if cb else []
-                    armed = bool(server_ref._is_armed())
+                    following = bool(server_ref._is_following())
                     self._json({"items": items,
                                 "all_ok": all(i.get("ok") for i in items) if items else False,
-                                "armed": armed})
-                elif route == '/arm_tracker':
+                                "following": following})
+                elif route == '/follow':
                     kv = urllib.parse.parse_qs(qs, keep_blank_values=False)
                     on = (kv.get('on', ['true'])[0].lower() == 'true')
-                    cb = server_ref._arm_cb
+                    cb = server_ref._follow_cb
                     data = cb(on) if cb else {'status': 'error', 'msg': 'not wired'}
                     self._json(data)
                 elif route == '/takeoff':

@@ -67,10 +67,12 @@ def test_web_ui_renders_outdoor_only_with_pfwait_class():
     assert "'[WAIT] '" in html
 
 
-def test_web_ui_outdoor_only_does_not_affect_arm_button_disable():
-    """SAFETY — the [WAIT] visual must not affect d.all_ok. The ARM
+def test_web_ui_outdoor_only_does_not_affect_follow_button_disable():
+    """SAFETY — the [WAIT] visual must not affect d.all_ok. The FOLLOW
     button is still disabled if any item is not ok, including outdoor-only
     ones. Check the JS still uses d.all_ok untouched."""
     html = StreamServer()._build_html().decode()
-    # The ARM button gating is unchanged.
-    assert "document.getElementById('armgo').disabled = !d.all_ok" in html
+    # The FOLLOW button gating is unchanged (renamed from `armgo` to
+    # `startfollow` in the `arm`→`follow` rename, but the d.all_ok
+    # semantics are preserved).
+    assert "document.getElementById('startfollow').disabled = !d.all_ok" in html

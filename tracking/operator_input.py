@@ -42,8 +42,8 @@ _HELP: list[tuple[str, str]] = [
     ("mode",                       "print current tracker mode"),
     ("mode auto|manual",           "set tracker mode"),
     ("mode brake|land|rtl",        "request FCU safety mode (--drone required)"),
-    ("arm",                        "arm drone-body tracker after preflight (--drone)"),
-    ("disarm",                     "stop following (tracker only; FCU mode unchanged)"),
+    ("follow",                     "enable drone-body following after preflight (--drone)"),
+    ("unfollow",                   "stop drone-body following (tracker only; FCU mode unchanged)"),
     ("takeoff [alt]",              "command FCU takeoff to alt m AGL (default 7) — --drone, FCU armed + landed"),
     ("estop",                      "BRAKE; press again within 3s for LAND"),
     ("pan <-100..100>",            "manual gimbal pan speed (MANUAL mode)"),
@@ -98,7 +98,7 @@ class OperatorInputController:
         request_rtl:   Optional[Callable[[], dict]] = None,
         request_brake: Optional[Callable[[], dict]] = None,
         handle_estop:     Optional[Callable[[str], dict]]       = None,
-        handle_arm:       Optional[Callable[[Optional[bool]], dict]] = None,
+        handle_follow:    Optional[Callable[[Optional[bool]], dict]] = None,
         handle_takeoff:   Optional[Callable[[Optional[float]], dict]] = None,
         handle_preflight: Optional[Callable[[], list]]          = None,
         handle_telemetry: Optional[Callable[[], dict]]          = None,
@@ -122,7 +122,7 @@ class OperatorInputController:
 
         # SSH-parity callbacks (browser-equivalent actions for stdin use).
         self._handle_estop     = handle_estop
-        self._handle_arm       = handle_arm
+        self._handle_follow    = handle_follow
         self._handle_takeoff   = handle_takeoff
         self._handle_preflight = handle_preflight
         self._handle_telemetry = handle_telemetry
@@ -151,7 +151,7 @@ class OperatorInputController:
         st = self._state
         print("[Cmd] Stdin command loop ready — type 'help' for the full list. "
               "Quick: track <id> | unlock | ids | status | preflight | "
-              "mode auto|manual | arm | disarm | takeoff [alt] | estop | q")
+              "mode auto|manual | follow | unfollow | takeoff [alt] | estop | q")
         while st.running:
             # Narrow I/O try: a stdin failure means the thread really
             # cannot recover (stdin closed, pipe broken), so break out.
@@ -206,11 +206,11 @@ class OperatorInputController:
                     else:
                         print("[Cmd] Usage: mode | mode auto|manual|brake|land|rtl")
 
-                # --- Drone-body arm + software E-STOP ---
-                elif line == "arm":
-                    self._handle_stdin_arm(True)
-                elif line == "disarm":
-                    self._handle_stdin_arm(False)
+                # --- Drone-body follow toggle + software E-STOP ---
+                elif line == "follow":
+                    self._handle_stdin_follow(True)
+                elif line == "unfollow":
+                    self._handle_stdin_follow(False)
                 elif line == "takeoff" or line.startswith("takeoff "):
                     parts = line.split()
                     if len(parts) == 1:
@@ -338,16 +338,21 @@ class OperatorInputController:
         else:
             print(f"[Cmd] {label} failed: {msg}")
 
-    def _handle_stdin_arm(self, on: bool) -> None:
-        """Stdin wrapper around the handle_arm callback.
+    def _handle_stdin_follow(self, on: bool) -> None:
+        """Stdin wrapper around the handle_follow callback.
 
-        Mirrors what the web UI's Arm/Stop-Follow buttons do but prints
-        an operator-friendly summary instead of returning JSON. The
-        underlying handler emits its own flight-log event ('arm' /
-        'disarm'); we do not log here to avoid double-entries.
+        Mirrors what the web UI's Start/Stop-Following buttons do but
+        prints an operator-friendly summary instead of returning JSON.
+        The underlying handler emits its own flight-log event
+        ('follow' / 'unfollow'); we do not log here to avoid double-entries.
+
+        Renamed from `_handle_stdin_arm` to remove the FCU-arm collision
+        — `arm` historically meant both "FCU motor enable" (RC pilot's
+        job) and "tracker authority to send velocity" (operator's job),
+        which confused several field tests.
         """
-        verb = "arm" if on else "disarm"
-        cb   = self._handle_arm
+        verb = "follow" if on else "unfollow"
+        cb   = self._handle_follow
         if cb is None:
             print(f"[Cmd] {verb} unavailable — handler not wired "
                   "(launched without --drone?)")
@@ -357,18 +362,18 @@ class OperatorInputController:
         except Exception as exc:
             print(f"[Cmd] {verb} error: {exc}")
             return
-        status = result.get("status", "error")
-        msg    = result.get("msg", "")
-        armed  = result.get("armed", False)
+        status    = result.get("status", "error")
+        msg       = result.get("msg", "")
+        following = result.get("following", False)
         if status == "ok":
-            label = "ARMED" if armed else "DISARMED"
+            label = "FOLLOWING" if following else "FOLLOW STOPPED"
             print(f"[Cmd] {label}" + (f" — {msg}" if msg else ""))
         else:
             print(f"[Cmd] {verb} refused: {msg or 'unknown error'}")
             self._print_preflight_breakdown(result)
 
     def _print_preflight_breakdown(self, result: dict) -> None:
-        """Render per-failing-item lines under a refused arm/takeoff.
+        """Render per-failing-item lines under a refused follow/takeoff.
 
         ``result['items']`` is the structured preflight list returned by the
         underlying handler. We surface only the failing items so the operator
@@ -504,8 +509,8 @@ class OperatorInputController:
         print("[Cmd] status:")
         print(f"  tracker={data.get('mode_tracker', '—')}  "
               f"drone={'on' if data.get('drone_enabled') else 'off'}  "
-              f"armed=tracker:{yn(data.get('drone_armed'))} "
-              f"fcu:{yn(data.get('armed_fcu'))}")
+              f"follow={yn(data.get('drone_following'))} "
+              f"fcu_armed={yn(data.get('armed_fcu'))}")
         print(f"  mavlink={'up' if data.get('mavlink') else 'down'}  "
               f"mode_fcu={fmt(data.get('mode_fcu'))}  "
               f"rc={'on' if data.get('rc_connected') else 'off'}{rssi_str}")
@@ -574,8 +579,8 @@ class OperatorInputController:
     # Map each single-letter shortcut to the equivalent stdin command(s)
     # so the operator gets an actionable hint instead of a bare "unknown".
     # NOTE: we deliberately do NOT alias these into real commands —
-    # mistyping 't' while the tracker is armed should not silently disable
-    # tracking. The hint is informational only.
+    # mistyping 't' while the tracker is following must not silently
+    # disable tracking. The hint is informational only.
     _DISPLAY_KEY_HINTS: dict = {
         "t": "track on / track off  (or 'ids' + 'track <id>')",
         "r": "center",
@@ -591,17 +596,29 @@ class OperatorInputController:
         "q": "q",
     }
 
+    # Words that used to be tracker commands but were renamed to avoid
+    # the FCU-arm collision (see _handle_stdin_follow docstring). NOT
+    # aliased — typing the old word returns 'unknown' with a hint, so
+    # the rename is enforced and the old terminology can be retired.
+    _RENAMED_COMMANDS: dict = {
+        "arm":    "follow      (drone-body follow ON; FCU arming is the RC pilot's job)",
+        "disarm": "unfollow    (drone-body follow OFF; FCU stays armed)",
+    }
+
     def _print_unknown(self, line: str) -> None:
         """Print an 'unknown command' hint and log it to the flight log."""
         print(f"[Cmd] unknown: {line!r} — type 'help' for the list")
+        stripped = line.strip().lower()
         # If the operator typed a single-character display-window shortcut,
         # tell them which stdin command to use instead. Headless sessions
         # have no display window, so 't' / 'r' / etc. fall through here
         # and otherwise produce a confusing "unknown" with no remedy.
-        stripped = line.strip().lower()
         if stripped in self._DISPLAY_KEY_HINTS:
             print(f"[Cmd]   '{stripped}' is a display-window shortcut; "
                   f"from stdin use: {self._DISPLAY_KEY_HINTS[stripped]}")
+        elif stripped in self._RENAMED_COMMANDS:
+            print(f"[Cmd]   '{stripped}' was renamed → "
+                  f"use {self._RENAMED_COMMANDS[stripped]}")
         safe_event("ssh_unknown_command", line=line)
 
     # ------------------------------------------------------------------

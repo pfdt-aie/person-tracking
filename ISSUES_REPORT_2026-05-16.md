@@ -1,5 +1,10 @@
 # Field Issues Report — 2026-05-16
 
+> **Historical note (added later):** the tracker commands `arm` / `disarm` quoted
+> verbatim from log files below were subsequently renamed to `follow` / `unfollow`
+> to eliminate the FCU-arm collision that contributed to the operator confusion
+> documented here. Log files from this date still contain the old wording.
+
 Sessions analysed:
 
 | # | Log | Lines | Notes |

@@ -2,7 +2,7 @@
 
 Gates that overlap preflight (MAVLink link, FCU ARMED, mode == GUIDED)
 are exercised here through the preflight stub so the handler keeps a
-single source of truth — mirrors how `_handle_arm` is tested.
+single source of truth — mirrors how `_handle_follow` is tested.
 """
 import io
 import pathlib
