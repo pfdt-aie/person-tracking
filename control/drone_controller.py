@@ -246,6 +246,15 @@ class DroneController:
         # between detection updates (predict-only steps incur no measurement cost).
         self._ekf.predict(dt)
 
+        # Ground-test mode: bypass all flight-critical gates and run the full
+        # velocity pipeline. MAVLink TX is already suppressed by the client;
+        # commands are logged as [DRY-RUN] so operators can verify the pipeline
+        # on a bench without GPS, arming, or RC.
+        if self._mav.is_ground_test():
+            return self._update_ground_test_pipeline(
+                gimbal_pan_deg, gimbal_tilt_deg, target_info, now, dt
+            )
+
         # --- Safety pre-checks ---
         if not self._mav.is_connected():
             return 0.0
@@ -283,6 +292,10 @@ class DroneController:
 
         # --- A2: ARM state gate ---
         if not self._mav.is_armed():
+            if now - self._mode_warn_t >= self._s.mode_warn_interval_s:
+                self._mode_warn_t = now
+                print("[Drone] FCU not armed — body commands suppressed "
+                      "(arm the FCU before 'follow')")
             return 0.0
 
         # --- A3: Home-position gate ---
@@ -480,6 +493,112 @@ class DroneController:
             self._mav.send_zero_velocity()
             return 0.0
 
+        self._mav.send_position_velocity_ned(
+            target_pN, target_pE, target_pD,
+            vN, vE, 0.0,
+        )
+        return pan_correction_rads
+
+    # ------------------------------------------------------------------
+    #  Ground-test pipeline  (--ground-test bench verification)
+    # ------------------------------------------------------------------
+
+    def _update_ground_test_pipeline(
+        self,
+        gimbal_pan_deg:  float,
+        gimbal_tilt_deg: float,
+        target_info:     Optional[TargetDetection],
+        now:             float,
+        dt:              float,
+    ) -> float:
+        """Run the full following pipeline without any flight-critical gates.
+
+        Called in place of the main update() body when --ground-test is active.
+        All MAVLink sends are intercepted by the client and logged as [DRY-RUN]
+        instead of transmitted.  Safety guards that make no sense on a bench
+        (ARM, HOME, GPS quality, RC link, geofence, altitude, separation) are
+        skipped so the EKF → velocity → command path can be fully exercised.
+
+        Prints a one-time banner so the operator knows the ground-test pipeline
+        is running, then periodically reports computed velocities.
+        """
+        if not getattr(self, "_gt_announced", False):
+            print("[Drone] Ground-test pipeline active — safety gates bypassed, "
+                  "TX suppressed. Tracking pipeline will log [DRY-RUN] commands.")
+            self._gt_announced = True
+
+        # Use a dummy NED origin when home position is unavailable on the bench.
+        if not self._origin_set:
+            if self._mav.is_home_set():
+                home_lat, home_lon, _ = self._mav.get_home_position()
+                self._origin_lat = home_lat
+                self._origin_lon = home_lon
+            else:
+                self._origin_lat = 0.0
+                self._origin_lon = 0.0
+            self._origin_set = True
+
+        # Update EKF with latest detection (may use near-zero GPS in bench mode).
+        if target_info is not None and self._origin_set:
+            self._update_ekf_from_detection(target_info)
+
+        # Tracking-loss failsafe still applies — identical logic to real flight.
+        with self._lock:
+            dt_lost = now - self._last_detection
+        pan_correction = self._handle_tracking_loss(dt_lost, now)
+        if pan_correction is not None:
+            return pan_correction
+
+        # FPS floor: same as real flight.
+        fps = self.effective_fps()
+        if fps > 0.0 and fps < self._s.min_tracking_fps:
+            if not self._fps_warned:
+                print(f"[Drone] Detection FPS {fps:.1f} < "
+                      f"{self._s.min_tracking_fps:.1f} — body holding")
+                self._fps_warned = True
+            self._mav.send_zero_velocity()
+            return 0.0
+        elif fps >= self._s.min_tracking_fps and self._fps_warned:
+            print(f"[Drone] Detection FPS recovered ({fps:.1f}) — body resuming")
+            self._fps_warned = False
+
+        # Body-movement confirmation: same as real flight.
+        if not self.is_body_confirmed():
+            self._mav.send_zero_velocity()
+            return 0.0
+
+        # Compute following velocity from EKF state.
+        vN, vE = self._compute_follow_velocity(dt)
+        if vN is None:
+            self._mav.send_zero_velocity()
+            return 0.0
+
+        pan_correction_rads = self._compute_yaw_correction(gimbal_pan_deg, dt)
+
+        if not self._ekf.is_valid or not self._origin_set:
+            self._mav.send_zero_velocity()
+            return 0.0
+
+        pN, pE             = self._ekf.get_position_ned()
+        drone_pN, drone_pE, _ = self._mav.get_position_ned()
+
+        # Skip separation / vertical-clearance guards — drone is on the bench.
+
+        sep = math.hypot(pN - drone_pN, pE - drone_pE)
+        vN_p, vE_p = self._ekf.get_velocity_ned()
+        bearing = self._update_bearing(
+            pN=pN, pE=pE,
+            drone_pN=drone_pN, drone_pE=drone_pE, sep=max(sep, 0.1),
+            vN_p=vN_p, vE_p=vE_p, now=now, dt=dt,
+        )
+
+        target_pN = pN - math.cos(bearing) * self._s.follow_standoff_m
+        target_pE = pE - math.sin(bearing) * self._s.follow_standoff_m
+        target_pD = -(self._s.follow_altitude_m)
+
+        # Skip geofence / home-keepout checks — not meaningful on a bench.
+
+        # TX is suppressed by the client in ground-test; this call logs [DRY-RUN].
         self._mav.send_position_velocity_ned(
             target_pN, target_pE, target_pD,
             vN, vE, 0.0,
