@@ -212,10 +212,13 @@ class DroneController:
             not jump in frame.
         """
         if not drone_tracking_enabled:
-            # S3.3 — reset the session timer the moment the operator disarms.
-            self._session_start_t   = -1.0
-            self._session_rtl_issued = False
-            self._batt_low_warned   = False   # reset so next session warns fresh
+            # S3.3 — session timer persists across brief unfollow/follow cycles so
+            # the operator can't bypass the 10-minute cap by toggling.  Only reset
+            # when the FCU has been actually disarmed (motors stopped, on the ground).
+            if not self._mav.is_armed():
+                self._session_start_t    = -1.0
+                self._session_rtl_issued = False
+            self._batt_low_warned = False   # reset so next follow session warns fresh
             return 0.0
 
         now  = time.monotonic()
@@ -863,8 +866,8 @@ class DroneController:
         self._last_vertical_clearance_m = None
         self._vel_above_t   = -1.0
         self._bearing_init  = False
-        self._session_start_t   = -1.0
-        self._session_rtl_issued = False
+        # Preserve session timer across reset() — it only resets when FCU disarms.
+        # This prevents the operator bypassing the 10-min cap via unfollow+follow.
         self._rc_loss_loiter_issued = False
         self._ekf.reset()
 

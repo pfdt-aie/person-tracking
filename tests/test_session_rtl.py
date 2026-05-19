@@ -23,12 +23,13 @@ class _FakeMav:
         self.loiter_calls = 0
         self.last_velocity = None
         self.rc_connected = True
+        self.armed = True        # M3: settable to simulate FCU disarm
 
     # Health gates always pass so update() reaches the session check.
     def is_connected(self):           return True
     def get_last_heartbeat_time(self): return time.monotonic()
     def get_mode(self):                return "GUIDED"
-    def is_armed(self):                return True
+    def is_armed(self):                return self.armed
     def is_home_set(self):             return True
     def is_sensors_healthy(self):      return True
     def get_battery_voltage(self):     return 16.0
@@ -160,7 +161,8 @@ def test_disarm_clears_timer_and_latch():
     c._session_start_t -= cfg.MAX_FLIGHT_TIME_S + 1.0
     c.update(0.0, -45.0, None, drone_tracking_enabled=True)
     assert c._session_rtl_issued is True
-    # Operator disarms — state should reset
+    # FCU disarms — timer must reset (unfollow alone no longer resets it)
+    mav.armed = False
     c.update(0.0, -45.0, None, drone_tracking_enabled=False)
     assert c._session_start_t < 0
     assert c._session_rtl_issued is False

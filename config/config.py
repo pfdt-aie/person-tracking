@@ -94,7 +94,7 @@ ZOOM_CMD_INTERVAL: float         = 0.3
 LOST_CONFIRM_FRAMES: int    = 6    # Consecutive missed frames before "lost" (~200ms at 30fps)
 MIN_VELOCITY_PREDICT: float = 0.05 # vel below this → skip PREDICTING
 ID_REPORT_INTERVAL: float   = 2.0  # Seconds between ID prints (headless)
-LOCK_TARGET_GRACE_S: float  = 0.6  # Keep a locked target through brief detector dropouts
+LOCK_TARGET_GRACE_S: float  = 1.5  # Keep a locked target through brief detector dropouts
 LOCK_REACQUIRE_CENTER_RATIO: float = 0.25  # Max centre jump as fraction of frame diagonal
 LOCK_REACQUIRE_STRICT_CENTER_RATIO: float = 0.08  # Allow no-overlap reacquire only very nearby
 LOCK_REACQUIRE_MIN_IOU: float = 0.05  # Otherwise require some bbox overlap before remapping lock
@@ -317,7 +317,7 @@ CALIBRATION_YAML: str   = ""       # Path to calibration file; "" = auto-estimat
 
 # --- EKF projection fallbacks ---
 GIMBAL_TILT_DEFAULT_DEG: float = -45.0   # Used if real gimbal tilt not yet known
-DRONE_FOLLOW_DEADBAND_M: float = 0.5     # Position error below this = no horizontal command
+DRONE_FOLLOW_DEADBAND_M: float = 2.0     # Position error below this = no horizontal command (matches GPS noise floor)
 DRONE_MAX_YAW_RATE_DEG: float  = 20.0    # Max body-yaw rate during pan recenter
 
 # --- Safety enhancements ---

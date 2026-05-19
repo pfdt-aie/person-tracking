@@ -334,6 +334,10 @@ class PersonGimbalTracker:
         print("[Mode] ═══════════════════════════════════════════")
         print("[Mode]  *** AUTO MODE — Autonomous person tracking active ***")
         print(f"[Mode]  Drone following: {'ON' if self._drone_enabled else 'OFF'}")
+        if self._ts.lock_id is not None:
+            print(f"[Mode]  Target lock: ID {self._ts.lock_id} (type 'unlock' to release)")
+        else:
+            print("[Mode]  Target lock: NONE — type 'ids' then 'track <id>' to lock")
         print("[Mode] ═══════════════════════════════════════════")
 
     # ------------------------------------------------------------------
@@ -510,6 +514,9 @@ class PersonGimbalTracker:
         else:
             print("[Follow] Drone-body following ENABLED — preflight all green")
         safe_event("follow", checks_passed=len(items) - len(skipped))
+        if self._ts.lock_id is None:
+            print("[Follow] Hint: no target locked — drone will hover until you type "
+                  "'ids' then 'track <id>'")
         return {"following": True, "status": "ok", "msg": "following",
                 "items": [c.to_dict() for c in items]}
 
@@ -677,7 +684,11 @@ class PersonGimbalTracker:
         ts = self._ts
         fresh_target = target_info if (target_info is not None and target_info.is_fresh) else None
         detected_for_drone = fresh_target is not None and ts.mode == "AUTO"
-        self.drone_ctrl.notify_detection(detected_for_drone)
+        # H4: drone body only moves toward the explicitly operator-locked target.
+        # Without a lock, the gimbal still tracks whoever it sees, but the drone
+        # hovers — prevents following the wrong person before operator confirms.
+        locked_target = fresh_target if (detected_for_drone and ts.lock_id is not None) else None
+        self.drone_ctrl.notify_detection(locked_target is not None)
 
         attitude_fresh = self.ctrl.attitude_is_fresh()
         pan_deg = self.ctrl.gimbal_pan_deg
@@ -694,7 +705,7 @@ class PersonGimbalTracker:
         pan_correction = self.drone_ctrl.update(
             gimbal_pan_deg=pan_deg,
             gimbal_tilt_deg=tilt_deg,
-            target_info=fresh_target if attitude_fresh else None,
+            target_info=locked_target if attitude_fresh else None,
             drone_tracking_enabled=(
                 ts.tracking_enabled
                 and ts.drone_following

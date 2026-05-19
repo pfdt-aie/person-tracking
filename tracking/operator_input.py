@@ -232,8 +232,12 @@ class OperatorInputController:
                 elif line.startswith("track "):
                     parts = line.split()
                     if len(parts) == 2 and parts[1].isdigit():
-                        st.lock_id = int(parts[1])
-                        print(f"[Target] Locked onto ID {st.lock_id}. Type 'unlock' to release.")
+                        new_id = int(parts[1])
+                        if st.lock_id == new_id:
+                            print(f"[Target] Already locked to ID {new_id}")
+                        else:
+                            st.lock_id = new_id
+                            print(f"[Target] Locked onto ID {st.lock_id}. Type 'unlock' to release.")
                     elif len(parts) == 2 and parts[1] in ("on", "off"):
                         self._toggle_tracking(state=(parts[1] == "on"))
                     else:
