@@ -14,6 +14,14 @@ All classes share the interface:
 
 Commands are SIYI speed units (-100..+100). Caller must send them to
 SIYIController.set_speed() every frame.
+
+GROUND-TARGET CONSTRAINT
+------------------------
+The camera is mounted on the drone and the target (person) is always on
+the ground below. All patterns therefore restrict pitch to the downward
+hemisphere only — the camera NEVER tilts above horizontal (never looks
+at the sky). Sign convention: positive pitch speed = tilt DOWN toward
+ground, negative pitch speed = tilt UP toward sky.
 """
 
 import math
@@ -37,20 +45,24 @@ class InitialScanSearch:
     PHASES: int = 3  # pitch levels
 
     def __init__(self) -> None:
-        self.active: bool       = False
-        self._pitch_level: int  = 0     # 0=top, 1=mid, 2=bottom
-        self._yaw_dir: int      = 1     # +1=right, -1=left
-        self._sweep_done: int   = 0
-        self._state: str        = "sweep"  # 'sweep'|'pitch_dn'|'pitch_up'
-        self._phase_t: float    = 0.0
+        self.active: bool        = False
+        self._pitch_level: int   = 0     # 0=shallow-down, 1=mid, 2=steep-down
+        self._yaw_dir: int       = 1     # +1=right, -1=left
+        self._sweep_done: int    = 0
+        self._state: str         = "pretilt"  # 'pretilt'|'sweep'|'pitch_dn'|'pitch_up'
+        self._phase_t: float     = 0.0
 
     def start(self) -> None:
-        """Begin acquisition raster from the top pitch level."""
+        """Begin acquisition raster.
+
+        Starts with a brief downward pre-tilt so level-0 sweeps within the
+        ground search zone rather than at the horizon.
+        """
         self.active       = True
         self._pitch_level = 0
         self._yaw_dir     = 1
         self._sweep_done  = 0
-        self._state       = "sweep"
+        self._state       = "pretilt"   # tilt down into ground zone first
         self._phase_t     = time.time()
         print(
             f"[InitScan] Acquisition raster started "
@@ -61,13 +73,25 @@ class InitialScanSearch:
         self.active = False
 
     def get_command(self) -> tuple[int, int]:
-        """Return (yaw_speed, pitch_speed) for current raster state."""
+        """Return (yaw_speed, pitch_speed) for current raster state.
+
+        Pitch is ONLY ever positive (downward) or zero — never negative
+        (never tilts up toward the sky).
+        """
         if not self.active:
             return 0, 0
 
         now     = time.time()
         elapsed = now - self._phase_t
 
+        # Pre-tilt: tilt down into the ground search zone before sweeping.
+        if self._state == "pretilt":
+            if elapsed >= cfg.INIT_SCAN_PRETILT_TIME:
+                self._state   = "sweep"
+                self._phase_t = now
+            return 0, cfg.INIT_SCAN_PITCH_SPEED  # positive = down
+
+        # Stepping down to the next pitch level (deeper depression).
         if self._state == "pitch_dn":
             if elapsed >= cfg.INIT_SCAN_PITCH_STEP_TIME:
                 self._pitch_level += 1
@@ -75,8 +99,11 @@ class InitialScanSearch:
                 self._state        = "sweep"
                 self._phase_t      = now
                 print(f"[InitScan] Level {self._pitch_level + 1}/{self.PHASES}")
-            return 0, -cfg.INIT_SCAN_PITCH_SPEED
+            return 0, cfg.INIT_SCAN_PITCH_SPEED   # positive = down
 
+        # Return toward level-0 (shallow-down) — stop after PITCH_RETURN_TIME
+        # which is calibrated to equal the total downward travel so the gimbal
+        # ends back at the shallow-down starting position, not at the horizon.
         if self._state == "pitch_up":
             if elapsed >= cfg.INIT_SCAN_PITCH_RETURN_TIME:
                 self._pitch_level = 0
@@ -84,9 +111,9 @@ class InitialScanSearch:
                 self._state       = "sweep"
                 self._phase_t     = now
                 print("[InitScan] Raster complete — restarting from top")
-            return 0, cfg.INIT_SCAN_PITCH_SPEED
+            return 0, -cfg.INIT_SCAN_PITCH_SPEED  # negative = up (back to shallow-down)
 
-        # yaw sweep
+        # Yaw sweep at current pitch level.
         if elapsed >= cfg.INIT_SCAN_SWEEP_TIME:
             self._sweep_done += 1
             self._yaw_dir    *= -1
@@ -95,10 +122,10 @@ class InitialScanSearch:
                 self._sweep_done = 0
                 if self._pitch_level < self.PHASES - 1:
                     self._state = "pitch_dn"
-                    return 0, -cfg.INIT_SCAN_PITCH_SPEED
+                    return 0, cfg.INIT_SCAN_PITCH_SPEED   # down to next level
                 else:
                     self._state = "pitch_up"
-                    return 0, cfg.INIT_SCAN_PITCH_SPEED
+                    return 0, -cfg.INIT_SCAN_PITCH_SPEED  # back toward shallow-down
 
         return cfg.INIT_SCAN_SPEED * self._yaw_dir, 0
 
@@ -176,13 +203,11 @@ class SectorScanSearch:
             self.sweep_start_time = now
 
             if self.sweep_count >= self._max_sweeps():
-                self.pitch_scanning  = True
+                self.pitch_scanning   = True
                 self.pitch_scan_start = now
-                if self.pitch_direction == 0:
-                    self.pitch_direction = 1
-                else:
-                    self.pitch_direction *= -1
-
+                # Always scan downward — the person is on the ground, never in
+                # the sky. We never set pitch_direction to -1 (up).
+                self.pitch_direction  = 1
                 self.sweep_count = 0
                 if self.phase < 3:
                     self.phase        += 1
@@ -236,20 +261,20 @@ class ExpandingSquareSearch:
         self._arm: int          = 0
         self._arm_t: float      = 0.0
         self._yaw_first: int    = 1
-        self._pitch_first: int  = -1   # default: look down first
+        self._pitch_first: int  = 1   # +1 = down (positive = toward ground)
 
     def start(self, yaw_dir: int = 1, pitch_dir: int = 0) -> None:
         """Begin expanding-square search.
 
         Args:
             yaw_dir:   Starting yaw direction (+1 or -1).
-            pitch_dir: 0 = unknown → default scan down.
+            pitch_dir: 0 = unknown → default +1 (scan down toward ground).
         """
         self.active       = True
         self._arm         = 0
         self._arm_t       = time.time()
         self._yaw_first   = yaw_dir   if yaw_dir   != 0 else 1
-        self._pitch_first = pitch_dir if pitch_dir != 0 else -1
+        self._pitch_first = pitch_dir if pitch_dir  > 0 else 1  # never use -1 (up)
         print(
             f"[ExpandSq] Expanding-square search started "
             f"(dir={'R' if self._yaw_first > 0 else 'L'}, "
@@ -265,16 +290,21 @@ class ExpandingSquareSearch:
         return cfg.EXP_SQUARE_BASE_TIME * ((self._arm // 2) + 1)
 
     def _arm_cmd(self) -> tuple[int, int]:
-        """Cycle through four directions: yaw+, pitch, yaw-, pitch-."""
+        """Cycle: yaw+, pitch-down, yaw-, hold.
+
+        The fourth arm (pitch-up in the original IAMSAR pattern) is replaced
+        with a neutral hold so the camera never tilts above horizontal.
+        Person is on the ground — pitching upward wastes time searching sky.
+        """
         mod = self._arm % 4
         if mod == 0:
-            return  self._yaw_first   * cfg.EXP_SQUARE_SPEED,       0
+            return  self._yaw_first * cfg.EXP_SQUARE_SPEED,      0
         elif mod == 1:
-            return  0,                  self._pitch_first * cfg.EXP_SQUARE_PITCH_SPEED
+            return  0,               cfg.EXP_SQUARE_PITCH_SPEED   # always down (+)
         elif mod == 2:
-            return -self._yaw_first   * cfg.EXP_SQUARE_SPEED,       0
+            return -self._yaw_first * cfg.EXP_SQUARE_SPEED,      0
         else:
-            return  0,                 -self._pitch_first * cfg.EXP_SQUARE_PITCH_SPEED
+            return  0, 0   # hold — no pitch-up arm
 
     def get_command(self) -> tuple[int, int]:
         if not self.active:
@@ -366,8 +396,10 @@ class LissajousSearch:
         t     = now - self._t0
         w_y   = 2.0 * math.pi / cfg.LISSAJOUS_YAW_PERIOD
         w_p   = 2.0 * math.pi / cfg.LISSAJOUS_PITCH_PERIOD
-        yaw   = int(cfg.LISSAJOUS_YAW_SPEED   * math.cos(w_y * t))
-        pitch = int(cfg.LISSAJOUS_PITCH_SPEED  * math.cos(w_p * t))
+        yaw   = int(cfg.LISSAJOUS_YAW_SPEED  * math.cos(w_y * t))
+        # Pitch: use (1 - cos) / 2 so it oscillates between 0 (neutral) and
+        # +PITCH_SPEED (full down) — always positive, never tilts up toward sky.
+        pitch = int(cfg.LISSAJOUS_PITCH_SPEED * (1.0 - math.cos(w_p * t)) / 2.0)
         return yaw, pitch
 
     @property

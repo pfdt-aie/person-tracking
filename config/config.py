@@ -153,8 +153,9 @@ INIT_SCAN_SPEED: int              = 12
 INIT_SCAN_SWEEP_TIME: float       = 4.5
 INIT_SCAN_SWEEPS_PER_LEVEL: int   = 2
 INIT_SCAN_PITCH_STEP_TIME: float  = 1.2
-INIT_SCAN_PITCH_RETURN_TIME: float = 2.8
+INIT_SCAN_PITCH_RETURN_TIME: float = 2.4  # = (PHASES-1)*STEP_TIME — returns exactly to level-0
 INIT_SCAN_PITCH_SPEED: int        = 10
+INIT_SCAN_PRETILT_TIME: float     = 1.0   # tilt down before raster so level-0 is in ground zone
 
 # --- Expanding Square Search (IAMSAR standard) ---
 EXP_SQUARE_SPEED: int       = 12
@@ -183,10 +184,10 @@ MAVLINK_DEVICE: str  = "/dev/ttyTHS1" # Tegra UART → Cube TELEM1/2 (override w
 MAVLINK_BAUD: int    = 921600
 
 # --- Following geometry ---
-FOLLOW_ALTITUDE_M: float      = 12.0   # Target AGL altitude to maintain (m)
-FOLLOW_STANDOFF_M: float      = 12.0   # Horizontal distance to hold behind/away from person (m)
-MIN_PERSON_DRONE_SEP_M: float = 8.0    # Hard minimum separation — retreat if closer (m)
-MIN_VERTICAL_SEP_M: float     = 8.0    # Soft vertical clearance above person (m)
+FOLLOW_ALTITUDE_M: float      = 7.0    # Target AGL altitude to maintain (m)
+FOLLOW_STANDOFF_M: float      = 7.0    # Horizontal distance to hold behind/away from person (m)
+MIN_PERSON_DRONE_SEP_M: float = 4.0    # Hard minimum separation — retreat if closer (m)
+MIN_VERTICAL_SEP_M: float     = 3.0    # Soft vertical clearance above person (m)
 RETREAT_SPEED_MS: float       = 1.0    # Speed used when actively backing away from subject
 RETREAT_HYSTERESIS_M: float   = 1.5    # Re-engage follow only when sep > MIN_SEP + this (m)
 STANDOFF_VEL_THRESHOLD_MS: float = 0.3 # Use person velocity direction above this speed (m/s)
@@ -200,7 +201,7 @@ BEARING_LATCH_S: float        = 1.0
 # Maximum rate of change of the standoff bearing (degrees per second).
 # Smooths transitions so the target NED point cannot teleport.
 BEARING_SLEW_DEG_S: float     = 30.0
-MIN_ALT_M: float             = 10.0  # Absolute altitude floor (m AGL) — SAFETY-CRITICAL
+MIN_ALT_M: float             = 5.0   # Absolute altitude floor (m AGL) — SAFETY-CRITICAL
 MAX_ALT_M: float             = 80.0  # Altitude ceiling (m AGL)
 
 # --- Operator takeoff command ---
@@ -213,7 +214,7 @@ DEFAULT_TAKEOFF_ALT_M: float = 7.0   # Default ascent target for `takeoff` (m AG
 MIN_TAKEOFF_ALT_M: float     = 1.0   # Reject takeoff requests below this (m)
 MAX_TAKEOFF_ALT_M: float     = 30.0  # Reject takeoff requests above this (m) — well under MAX_ALT_M
 GEOFENCE_RADIUS_M: float     = 500.0 # Circular geofence radius around home (m)
-HOME_KEEPOUT_RADIUS_M: float = 12.0  # No-fly cylinder around HOME (operator stands here)
+HOME_KEEPOUT_RADIUS_M: float = 5.0   # No-fly cylinder around HOME (operator stands here)
 
 # --- Proportional controller ---
 DRONE_KP: float     = 0.4    # Position error → velocity (m/s per meter of error)

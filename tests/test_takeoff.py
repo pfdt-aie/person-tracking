@@ -227,7 +227,7 @@ def test_refuses_when_guided_switch_fails(monkeypatch):
 def test_low_altitude_succeeds_but_warns(monkeypatch):
     _patch_flight_log(monkeypatch)
     t = _tracker()
-    result = t._handle_takeoff(5.0)   # below MIN_ALT_M = 10
+    result = t._handle_takeoff(cfg.MIN_ALT_M - 1.0)   # just below the current floor
     assert result["status"] == "ok"
     assert "WARNING" in result["msg"]
     assert str(cfg.MIN_ALT_M) in result["msg"]
