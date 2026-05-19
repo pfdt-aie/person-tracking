@@ -100,7 +100,8 @@ class DroneController:
         # S1.5 — body-movement confirmation counter.  Drone body stays at
         # zero velocity until BODY_MOVE_CONFIRM_FRAMES consecutive valid
         # detections.  Gimbal control is independent and tracks immediately.
-        self._confirm_count: int = 0
+        self._confirm_count:  int = 0
+        self._confirm_misses: int = 0   # consecutive missed frames; resets count only after threshold
 
         # S1.4 — retreat latch.  Once horizontal separation drops below
         # MIN_PERSON_DRONE_SEP_M, stay retreating until sep exceeds
@@ -163,13 +164,21 @@ class DroneController:
         with self._lock:
             self._fps_times.append(now)   # S3.5 — sample for FPS window
             if detected:
+                self._confirm_misses  = 0
                 self._last_detection  = now
                 self._loiter_issued   = False
                 self._alert_issued    = False
                 if self._confirm_count < self._s.body_move_confirm_frames:
                     self._confirm_count += 1
             else:
-                self._confirm_count = 0
+                # Only reset the confirmation counter after LOST_CONFIRM_FRAMES
+                # consecutive misses.  A single dropped frame (very common with
+                # FFmpeg grabber or ByteTrack re-ID flicker) was previously
+                # resetting the counter to 0 every other frame, making it
+                # impossible to reach the 5-frame threshold.
+                self._confirm_misses += 1
+                if self._confirm_misses >= self._s.lost_confirm_frames:
+                    self._confirm_count = 0
 
     def is_body_confirmed(self) -> bool:
         """True once BODY_MOVE_CONFIRM_FRAMES consecutive detections seen."""
@@ -1001,10 +1010,11 @@ class DroneController:
         self._prev_ve = ve
         self._prev_an = 0.0
         self._prev_ae = 0.0
-        self._loiter_issued = False
-        self._alert_issued  = False
-        self._confirm_count = 0
-        self._retreating    = False
+        self._loiter_issued   = False
+        self._alert_issued    = False
+        self._confirm_count   = 0
+        self._confirm_misses  = 0
+        self._retreating      = False
         self._last_person_sep_m = None
         self._last_vertical_clearance_m = None
         self._vel_above_t   = -1.0
