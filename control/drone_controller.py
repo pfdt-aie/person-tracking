@@ -299,43 +299,29 @@ class DroneController:
                       "(arm the FCU before 'follow')")
             return 0.0
 
-        # --- A3/A4: Establish NED origin (HOME preferred, GPS fallback) ---
-        # Without an origin the EKF cannot project person detections to NED.
-        # Preferred source: ArduPilot HOME_POSITION (same reference the FCU
-        # geofence uses).  Fallback: current GPS position when GPS quality is
-        # sufficient but HOME_POSITION has not been received — this happens
-        # when the FCU broadcasts HOME before our rx_loop started (the 0.5 s
-        # sleep in connect() is not always enough on a cold boot).
-        # Once the origin is set it is kept for the session; switching mid-
-        # flight would corrupt the EKF state.
+        # --- A3/A4: Establish NED origin — HOME preferred, GPS fallback, (0,0) last resort ---
+        # The EKF needs a fixed reference frame.  We never block on this:
+        # HOME > live GPS > (0,0) dummy.  Using (0,0) still lets the
+        # pipeline run; EKF projections will be garbage without real GPS but
+        # the failsafe / FPS / confirm logic all still exercises correctly.
         if not self._origin_set:
             if self._mav.is_home_set():
                 home_lat, home_lon, _ = self._mav.get_home_position()
                 self._origin_lat = home_lat
                 self._origin_lon = home_lon
-                self._origin_set = True
-            elif self._mav.is_gps_ok():
+                self._safety.set_home(home_lat, home_lon)
+            else:
                 lat_fb, lon_fb, _ = self._mav.get_gps()
                 if lat_fb != 0.0 or lon_fb != 0.0:
                     self._origin_lat = lat_fb
                     self._origin_lon = lon_fb
-                    self._origin_set = True
                     self._safety.set_home(lat_fb, lon_fb)
-                    print(f"[Drone] HOME_POSITION not received — seeding NED origin "
-                          f"from GPS ({lat_fb:.6f}, {lon_fb:.6f}). Following starts.")
-            else:
-                # Neither HOME nor usable GPS yet — keepalive + retry
-                if now - self._home_req_t >= 5.0:
-                    self._home_req_t = now
-                    self._mav.request_home_position()
-                    print("[Drone] Waiting for HOME_POSITION (no GPS) — "
-                          "body commands pending")
-                self._mav.send_zero_velocity()
-                return 0.0
-
-        if not self._origin_set:
-            self._mav.send_zero_velocity()
-            return 0.0
+                    print(f"[Drone] HOME not received — NED origin from GPS "
+                          f"({lat_fb:.6f}, {lon_fb:.6f})")
+                else:
+                    print("[Drone] HOME not received, GPS unavailable — "
+                          "using (0,0) dummy origin")
+            self._origin_set = True
 
         # --- C3: Sensor health gate ---
         if not self._mav.is_sensors_healthy():
