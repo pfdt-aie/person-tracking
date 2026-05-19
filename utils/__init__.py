@@ -1,5 +1,5 @@
 """utils — Frame capture, logging, video recording, terminal helpers."""
-from utils.frame_grabber import FrameGrabber
-from utils.video_recorder import VideoRecorder
-
+# No eager imports here — import directly from submodules to avoid
+# triggering heavy dependencies (cv2, config.settings, etc.) whenever
+# any utils submodule is imported.
 __all__ = ["FrameGrabber", "VideoRecorder"]
