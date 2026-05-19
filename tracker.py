@@ -483,10 +483,16 @@ class PersonGimbalTracker:
             return {"following": False, "status": "error",
                     "msg": "tracker launched without --drone"}
 
-        # Idempotency: already following → skip preflight re-run and RC-override
-        # reset so repeated 'follow' commands (or web UI polling) don't disrupt
-        # a pilot's manual RC correction that clear_rc_override() would undo.
+        # Idempotency: already following.
+        # If the RC-override latch is active (pilot switched modes and back),
+        # re-typing 'follow' is the operator's explicit intent to resume —
+        # clear the latch so the drone controller can send commands again.
+        # Web UI polling that hits this path when not latched is harmless.
         if self._ts.drone_following:
+            if self.mav.is_rc_override_active():
+                self.mav.clear_rc_override()
+                print("[Follow] RC override latch cleared — body following resumed")
+                return {"following": True, "status": "ok", "msg": "rc_override_cleared"}
             return {"following": True, "status": "ok", "msg": "already following"}
 
         items = self.preflight.run()
