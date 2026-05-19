@@ -462,74 +462,107 @@ class DroneController:
             self._mav.send_zero_velocity()
             return 0.0
 
-        # --- Compute following velocity ---
-        vN, vE = self._compute_follow_velocity(dt)
-        if vN is None:
+        # ----------------------------------------------------------------
+        # GPS-based follow: eliminates NED-frame mismatch between our
+        # EKF origin and ArduPilot's LOCAL_NED EKF origin. All distances
+        # and bearings are computed from GPS coordinates; the final command
+        # is velocity-only (no position target) so the wrong-frame position
+        # component can never send the drone to the wrong absolute location.
+        # ----------------------------------------------------------------
+
+        pN_p, pE_p       = self._ekf.get_position_ned()
+        vN_p, vE_p       = self._ekf.get_velocity_ned()
+
+        # Person GPS from our EKF (referenced to our origin — GPS or HOME)
+        person_lat, person_lon = self._ekf.ned_to_gps(
+            pN_p, pE_p, self._origin_lat, self._origin_lon
+        )
+
+        # Drone GPS from FCU telemetry — absolute, frame-independent
+        drone_lat, drone_lon, _ = self._mav.get_gps()
+        if drone_lat == 0.0 and drone_lon == 0.0:
             self._mav.send_zero_velocity()
             return 0.0
 
-        # --- Drone yaw correction for gimbal pan ---
-        pan_correction_rads = self._compute_yaw_correction(gimbal_pan_deg, dt)
-
-        pN, pE             = self._ekf.get_position_ned()
-        drone_pN, drone_pE, _ = self._mav.get_position_ned()
-
-        # S1.4 — Hard separation guard with active retreat + hysteresis.
-        sep = math.hypot(pN - drone_pN, pE - drone_pE)
+        # Drone→person vector in NED metres (flat-earth, GPS-based)
+        _R        = 6_371_000.0
+        _cos_lat  = math.cos(math.radians(drone_lat))
+        dn = (person_lat - drone_lat) * _R * (math.pi / 180.0)
+        de = (person_lon - drone_lon) * _R * (math.pi / 180.0) * _cos_lat
+        sep = math.hypot(dn, de)
         self._last_person_sep_m = sep
+
+        # S1.4 — Separation guard: retreat if inside MIN_PERSON_DRONE_SEP_M
         if self._should_retreat(sep):
             if now - getattr(self, '_retreat_warn_t', 0.0) >= 2.0:
                 self._retreat_warn_t = now
                 print(f"[Drone] Person {sep:.1f}m from drone "
                       f"(min {self._s.min_person_drone_sep_m:.0f}m) — retreating")
-            self._send_retreat_velocity(pN, pE, drone_pN, drone_pE, sep)
+            if sep > 0.01:
+                self._mav.send_velocity_ned(
+                    -dn / sep * self._s.retreat_speed_ms,
+                    -de / sep * self._s.retreat_speed_ms,
+                    0.0,
+                )
             return 0.0
 
-        # S1.4 — Vertical separation guard.
+        # S1.4 — Vertical clearance guard
         alt_agl = self._mav.get_altitude_agl()
         self._last_vertical_clearance_m = alt_agl
-        min_vertical_clearance = max(self._s.min_vertical_sep_m, self._s.follow_altitude_m)
-        if alt_agl < min_vertical_clearance:
+        min_vert = max(self._s.min_vertical_sep_m, self._s.follow_altitude_m)
+        if alt_agl < min_vert:
             if now - getattr(self, '_vclear_warn_t', 0.0) >= 3.0:
                 self._vclear_warn_t = now
-                print(f"[Drone] Altitude {alt_agl:.1f}m below follow minimum "
-                      f"{min_vertical_clearance:.0f}m — climbing "
-                      f"(min_vertical_sep={self._s.min_vertical_sep_m:.0f}m, "
-                      f"follow_alt={self._s.follow_altitude_m:.0f}m)")
+                print(f"[Drone] Altitude {alt_agl:.1f}m below "
+                      f"{min_vert:.0f}m follow minimum — climbing")
             self._mav.send_velocity_ned(0.0, 0.0, -self._s.retreat_speed_ms)
             return 0.0
 
-        # S2.6 — Standoff bearing with hysteresis + slew-rate limit.
-        vN_p, vE_p = self._ekf.get_velocity_ned()
+        # S2.6 — Bearing with slew-rate limit.
+        # Pass GPS-based dn/de as the "NED-from-drone-to-person" vector;
+        # _update_bearing treats its pN/pE - drone_pN/pE as that vector.
         bearing = self._update_bearing(
-            pN=pN, pE=pE,
-            drone_pN=drone_pN, drone_pE=drone_pE, sep=sep,
+            pN=dn, pE=de,
+            drone_pN=0.0, drone_pE=0.0, sep=max(sep, 0.1),
             vN_p=vN_p, vE_p=vE_p, now=now, dt=dt,
         )
 
-        # Desired position is FOLLOW_STANDOFF_M behind person along bearing
-        target_pN = pN - math.cos(bearing) * self._s.follow_standoff_m
-        target_pE = pE - math.sin(bearing) * self._s.follow_standoff_m
-        target_pD = -(self._s.follow_altitude_m)   # NED down; altitude from config only
+        # Standoff target: FOLLOW_STANDOFF_M behind person along bearing.
+        # target_dn/de = how far the drone still needs to travel.
+        target_dn = dn - math.cos(bearing) * self._s.follow_standoff_m
+        target_de = de - math.sin(bearing) * self._s.follow_standoff_m
+        target_dist = math.hypot(target_dn, target_de)
 
-        # Altitude safety clamp
-        safe_alt  = self._safety.check_altitude(self._s.follow_altitude_m)
-        target_pD = -safe_alt
+        # Proportional velocity toward standoff target + person feedforward
+        if target_dist < self._s.drone_follow_deadband_m:
+            vN, vE = self._apply_smoother(0.0, 0.0, dt)
+        else:
+            raw_vn = self._s.drone_kp * target_dn + vN_p
+            raw_ve = self._s.drone_kp * target_de + vE_p
+            vN, vE = self._apply_smoother(raw_vn, raw_ve, dt)
 
-        if not self._target_within_geofence(target_pN, target_pE, safe_alt):
-            self._mav.send_zero_velocity()
-            return 0.0
+        # S2.2 — HOME keep-out: only meaningful when actual HOME_POSITION
+        # was received (not GPS fallback where origin = drone hover spot).
+        if self._mav.is_home_set():
+            tkN = pN_p - math.cos(bearing) * self._s.follow_standoff_m
+            tkE = pE_p - math.sin(bearing) * self._s.follow_standoff_m
+            if not self._safety.check_home_keepout(tkN, tkE):
+                self._mav.send_zero_velocity()
+                return 0.0
 
-        # S2.2 — HOME keep-out. Refuse targets that would put the airframe
-        # on top of the operator standing at HOME.
-        if not self._safety.check_home_keepout(target_pN, target_pE):
-            self._mav.send_zero_velocity()
-            return 0.0
+        # --- Drone yaw correction for gimbal pan ---
+        pan_correction_rads = self._compute_yaw_correction(gimbal_pan_deg, dt)
 
-        self._mav.send_position_velocity_ned(
-            target_pN, target_pE, target_pD,
-            vN, vE, 0.0,
-        )
+        # Confirmation log every 3 s so operator knows commands are flowing
+        if now - getattr(self, '_follow_log_t', 0.0) >= 3.0:
+            self._follow_log_t = now
+            print(f"[Drone] Following ✓  vel=({vN:.2f},{vE:.2f}) m/s  "
+                  f"person={sep:.1f}m  to_target={target_dist:.1f}m  "
+                  f"alt={alt_agl:.1f}m")
+
+        # Send VELOCITY ONLY — position target is frame-dependent and wrong;
+        # velocity computed from GPS is always in the correct direction.
+        self._mav.send_velocity_ned(vN, vE, 0.0)
         return pan_correction_rads
 
     # ------------------------------------------------------------------
