@@ -276,21 +276,24 @@ class SafetyMonitor:
             or never received.
         """
         watchdog = self._s.heartbeat_watchdog_s
-        if last_heartbeat_t <= 0.0:
-            if not self._hb_warn_logged:
-                self._log("MAVLink heartbeat lost (none received yet)")
+        with self._lock:
+            if last_heartbeat_t <= 0.0:
+                if not self._hb_warn_logged:
+                    self._log("MAVLink heartbeat lost (none received yet)")
+                    self._hb_warn_logged = True
+                return False
+            age = time.monotonic() - last_heartbeat_t
+            if age <= self._s.heartbeat_warn_s:
+                self._hb_warn_logged = False
+            elif age > watchdog:
+                if not self._hb_warn_logged:
+                    self._log(f"MAVLink heartbeat lost ({age:.1f}s stale)")
+                    self._hb_warn_logged = True
+                return False
+            elif not self._hb_warn_logged:
+                self._log(f"MAVLink heartbeat late ({age:.1f}s) — watching")
                 self._hb_warn_logged = True
-            return False
-        age = time.monotonic() - last_heartbeat_t
-        if age <= self._s.heartbeat_warn_s:
-            self._hb_warn_logged = False
-        elif age > watchdog:
-            self._log(f"MAVLink heartbeat lost ({age:.1f}s stale)")
-            return False
-        elif not self._hb_warn_logged:
-            self._log(f"MAVLink heartbeat late ({age:.1f}s) — watching")
-            self._hb_warn_logged = True
-        return age <= watchdog
+            return age <= watchdog
 
 
     #  Rule 5: Battery critical

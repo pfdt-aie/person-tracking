@@ -297,10 +297,15 @@ class PreflightCheck:
         # operator to guess what the rest were. Joined with '; ' so the
         # operator-input printer can split them onto separate lines.
         detail = "; ".join(f"{r.name}: {r.message}" for r in bad)
+        # If every failure is "not advertised by FCU" the batch prefetch has
+        # not finished yet — treat as WAIT so the operator knows to retry
+        # rather than run to Mission Planner.
+        all_loading = all("not advertised" in r.message for r in bad)
         return PreflightItem(
             name="ArduPilot params correct",
             ok=False,
             message=f"{len(bad)} failing — {detail}",
+            outdoor_only=all_loading,
         )
 
     def _check_battery(self) -> PreflightItem:
