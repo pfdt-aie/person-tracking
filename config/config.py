@@ -14,7 +14,7 @@ GIMBAL_PORT: int = 37260
 RTSP_URL: str    = "rtsp://192.168.144.25:8554/main.264"
 
 MODEL_PATH: str       = "models/yolo26s.engine"
-CONF_THRESHOLD: float = 0.45
+CONF_THRESHOLD: float = 0.35
 IMGSZ: int            = 640
 DETECT_DEVICE: str    = "auto"   # "auto" | "cpu" | "cuda:0" | "0"
 
@@ -91,26 +91,31 @@ ZOOM_CMD_INTERVAL: float         = 0.3
 #  MULTI-PERSON / DEBOUNCE
 # =============================================================================
 
-LOST_CONFIRM_FRAMES: int    = 3    # Consecutive missed frames before "lost"
+LOST_CONFIRM_FRAMES: int    = 6    # Consecutive missed frames before "lost" (~200ms at 30fps)
 MIN_VELOCITY_PREDICT: float = 0.05 # vel below this → skip PREDICTING
 ID_REPORT_INTERVAL: float   = 2.0  # Seconds between ID prints (headless)
+LOCK_TARGET_GRACE_S: float  = 0.6  # Keep a locked target through brief detector dropouts
+LOCK_REACQUIRE_CENTER_RATIO: float = 0.25  # Max centre jump as fraction of frame diagonal
+LOCK_REACQUIRE_STRICT_CENTER_RATIO: float = 0.08  # Allow no-overlap reacquire only very nearby
+LOCK_REACQUIRE_MIN_IOU: float = 0.05  # Otherwise require some bbox overlap before remapping lock
 
 # =============================================================================
 #  PERSON RE-IDENTIFICATION  (PersonRegistry thresholds)
 # =============================================================================
 
 REID_SIM_THRESHOLD: float = 0.80   # cosine similarity to consider "same person"
+REID_KNOWN_ID_MIN_SIM: float = 0.75 # reject recycled ByteTrack IDs below this appearance match
 REID_GALLERY_TTL: float   = 300.0  # seconds before an unseen person is forgotten
 
 # =============================================================================
 #  BATTERY DISPLAY THRESHOLDS
 # =============================================================================
-# Adjust per pack: 3S=9.9–12.6 V, 4S=13.2–16.8 V
+# Calibrated for 4S LiPo (16.8V full, ~13.2V storage, 13.6V RTL threshold)
 
-BATT_DISPLAY_MIN_V: float = 10.0   # 0% on battery bar (Volts)
-BATT_DISPLAY_MAX_V: float = 13.0   # 100% on battery bar
-BATT_WARN_V: float        = 11.5   # green → yellow threshold
-BATT_CRIT_V: float        = 10.5   # yellow → red threshold
+BATT_DISPLAY_MIN_V: float = 13.2   # 0% on battery bar — 4S storage voltage
+BATT_DISPLAY_MAX_V: float = 16.8   # 100% on battery bar — 4S full charge
+BATT_WARN_V: float        = 14.4   # green → yellow (3.6V/cell — plan to land)
+BATT_CRIT_V: float        = 13.6   # yellow → red (3.4V/cell — RTL imminent)
 
 BATTERY_POLL_INTERVAL: float  = 5.0    # send battery-request packet every N seconds (gimbal)
 BATTERY_PRINT_INTERVAL: float = 30.0   # print battery info to terminal every N seconds
@@ -166,6 +171,15 @@ EXP_SQUARE_MAX_ARMS: int    = 8
 # --- Search phase timeouts ---
 SECTOR_SEARCH_TIMEOUT: float = 15.0   # s in sector scan before → expanding square
 EXPAND_SEARCH_TIMEOUT: float = 45.0   # s in expanding square before → Lissajous
+
+# --- Search pitch envelope ---
+# SIYI tilt convention: negative = looking down. Search patterns may move
+# between these ground-looking bounds, but the FSM clamps commands that would
+# drive above the shallow bound or deeper than the steep bound.
+SEARCH_PITCH_SHALLOW_DEG: float = -12.0
+SEARCH_PITCH_STEEP_DEG: float   = -80.0
+SEARCH_RECENTER_PITCH_SPEED: int = 8
+SEARCH_RECENTER_GROUND_TIMEOUT_S: float = 3.0
 
 # --- Lissajous Long-Duration Search (Scientific Reports 2024) ---
 LISSAJOUS_YAW_SPEED: int       = 14
@@ -268,12 +282,19 @@ EKF_MAX_VARIANCE: float      = 1.0    # Reject if FCU EKF horizontal variance > 
 # --- Battery ---
 DEFAULT_CELLS: int           = 4      # Fallback if auto-detection fails
 CELL_NOMINAL_MV: int         = 3700   # Nominal cell voltage for cell-count detection
-CELL_CRITICAL_MV: int        = 3500   # Per-cell critical voltage → trigger RTL
+CELL_WARN_MV: int            = 3600   # Per-cell warning voltage → alert operator (14.4V on 4S)
+CELL_CRITICAL_MV: int        = 3500   # Per-cell critical voltage → trigger RTL (14.0V on 4S)
 
 # --- SIYI attitude telemetry ---
 GIMBAL_ATTITUDE_POLL_HZ: float = 10.0   # Request attitude at 10 Hz
 GIMBAL_ATTITUDE_STALE_S: float = 0.2    # Use commanded angles if telemetry older than this
 GIMBAL_COAST_S: float          = 0.5    # Suppress EKF update if telemetry stale beyond this
+GIMBAL_SPEED_FULL_SCALE_DEG_S: float = 60.0  # Estimated deg/s at SIYI speed=100
+GIMBAL_CMD_EST_MAX_DT_S: float = 0.25  # Cap one integration step after scheduler stalls
+GIMBAL_PAN_MIN_DEG: float = -160.0
+GIMBAL_PAN_MAX_DEG: float = 160.0
+GIMBAL_TILT_MIN_DEG: float = -135.0
+GIMBAL_TILT_MAX_DEG: float = 45.0
 
 # =============================================================================
 #  EXTENDED KALMAN FILTER  (person geolocation)

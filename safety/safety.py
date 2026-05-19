@@ -300,6 +300,18 @@ class SafetyMonitor:
     #  Rule 5: Battery critical
 
 
+    def is_battery_low(self, voltage_v: float) -> bool:
+        """Return True if per-cell voltage is below the WARNING threshold.
+
+        Caller should alert the operator to land soon; does NOT trigger RTL.
+        """
+        if voltage_v <= 0.0:
+            return False
+        with self._lock:
+            n = self._n_cells
+        per_cell = voltage_v / n
+        return per_cell < self._s.cell_warn_mv / 1000.0
+
     def is_battery_critical(self, voltage_v: float) -> bool:
         """Return True if per-cell voltage is below the critical threshold.
 

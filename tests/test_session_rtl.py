@@ -64,6 +64,7 @@ class _FakeEKF:
 
 class _FakeSafety:
     def watchdog_heartbeat(self, t):   return True
+    def is_battery_low(self, v):       return False
     def is_battery_critical(self, v):  return False
     def check_geofence(self, *a):      return True
     def geofence_contains(self, *a):   return True

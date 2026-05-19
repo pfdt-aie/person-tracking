@@ -98,6 +98,7 @@ class Settings:
     # --- Safety ---
     heartbeat_watchdog_s:   float = _cfg.HEARTBEAT_WATCHDOG_S
     heartbeat_warn_s:       float = _cfg.HEARTBEAT_WARN_S
+    cell_warn_mv:           int   = _cfg.CELL_WARN_MV
     cell_critical_mv:       int   = _cfg.CELL_CRITICAL_MV
     cell_nominal_mv:        int   = _cfg.CELL_NOMINAL_MV
     default_cells:          int   = _cfg.DEFAULT_CELLS

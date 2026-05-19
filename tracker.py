@@ -466,16 +466,24 @@ class PersonGimbalTracker:
             # commands (or an 'unfollow' after an E-STOP that already
             # stopped) don't pollute the flight log with phantom events.
             was_following = self._ts.drone_following
-            self._ts.drone_following = False
             if was_following:
-                print("[Follow] Drone-body following STOPPED by operator")
+                self._stop_drone_body_autonomy("operator")
+                if self._drone_enabled and self.mav.is_connected():
+                    self.mav.send_zero_velocity()
                 safe_event("unfollow", source="operator")
                 return {"following": False, "status": "ok", "msg": "stopped"}
+            self._ts.drone_following = False
             return {"following": False, "status": "ok", "msg": "already stopped"}
 
         if not self._drone_enabled:
             return {"following": False, "status": "error",
                     "msg": "tracker launched without --drone"}
+
+        # Idempotency: already following → skip preflight re-run and RC-override
+        # reset so repeated 'follow' commands (or web UI polling) don't disrupt
+        # a pilot's manual RC correction that clear_rc_override() would undo.
+        if self._ts.drone_following:
+            return {"following": True, "status": "ok", "msg": "already following"}
 
         items = self.preflight.run()
         # When the FCU is already armed, ArduPilot has already verified GPS
@@ -649,6 +657,56 @@ class PersonGimbalTracker:
 
     def _draw_overlay(self, frame: np.ndarray, target_info: Optional[TargetDetection]) -> None:
         self.hud.draw(frame, target_info)
+
+    def _update_drone_outer_loop(
+        self,
+        now: float,
+        person_detected: bool,
+        target_info: Optional[TargetDetection],
+    ) -> None:
+        """Run the 10 Hz drone safety/follow loop.
+
+        The loop must continue even if SIYI attitude telemetry is stale so
+        tracking-loss, battery, RC, and geofence failsafes still execute.
+        Stale attitude only suppresses fresh EKF measurement updates.
+        """
+        if not self._drone_enabled or now - self._last_drone_cmd < self._drone_cmd_interval:
+            return
+
+        self._last_drone_cmd = now
+        ts = self._ts
+        fresh_target = target_info if (target_info is not None and target_info.is_fresh) else None
+        detected_for_drone = fresh_target is not None and ts.mode == "AUTO"
+        self.drone_ctrl.notify_detection(detected_for_drone)
+
+        attitude_fresh = self.ctrl.attitude_is_fresh()
+        pan_deg = self.ctrl.gimbal_pan_deg
+        tilt_deg = self.ctrl.gimbal_tilt_deg
+        if attitude_fresh:
+            self.drone_ctrl.set_gimbal_angles(
+                pan_rad=math.radians(pan_deg),
+                tilt_rad=math.radians(tilt_deg),
+            )
+        else:
+            import logging as _log
+            _log.debug("[Drone] Gimbal telemetry stale — running failsafes with fallback angles")
+
+        pan_correction = self.drone_ctrl.update(
+            gimbal_pan_deg=pan_deg,
+            gimbal_tilt_deg=tilt_deg,
+            target_info=fresh_target if attitude_fresh else None,
+            drone_tracking_enabled=(
+                ts.tracking_enabled
+                and ts.drone_following
+                and ts.mode == "AUTO"
+            ),
+        )
+        if pan_correction != 0.0 and ts.state == State.TRACKING:
+            correction_speed = int(pan_correction * (180.0 / math.pi))
+            self.ctrl.set_speed(
+                max(-100, min(100, ts.telem_yaw_cmd + correction_speed)),
+                ts.telem_pitch_cmd,
+            )
 
     # ------------------------------------------------------------------
     #  Safe shutdown
@@ -834,34 +892,7 @@ class PersonGimbalTracker:
                     self.ctrl.set_speed(ts.manual_yaw_speed, ts.manual_pitch_speed)
 
                 # --- Drone outer loop (10 Hz) ---
-                if self._drone_enabled and now - self._last_drone_cmd >= self._drone_cmd_interval:
-                    self._last_drone_cmd = now
-                    detected_for_drone = person_detected and ts.mode == "AUTO"
-                    self.drone_ctrl.notify_detection(detected_for_drone)
-                    if self.ctrl.attitude_is_fresh():
-                        self.drone_ctrl.set_gimbal_angles(
-                            pan_rad  = math.radians(self.ctrl.gimbal_pan_deg),
-                            tilt_rad = math.radians(self.ctrl.gimbal_tilt_deg),
-                        )
-                        pan_correction = self.drone_ctrl.update(
-                            gimbal_pan_deg         = self.ctrl.gimbal_pan_deg,
-                            gimbal_tilt_deg        = self.ctrl.gimbal_tilt_deg,
-                            target_info            = target_info,
-                            drone_tracking_enabled = (
-                                ts.tracking_enabled
-                                and ts.drone_following         # S1.3 preflight gate
-                                and ts.mode == "AUTO"
-                            ),
-                        )
-                        if pan_correction != 0.0 and ts.state == State.TRACKING:
-                            correction_speed = int(pan_correction * (180.0 / math.pi))
-                            self.ctrl.set_speed(
-                                max(-100, min(100, ts.telem_yaw_cmd + correction_speed)),
-                                ts.telem_pitch_cmd,
-                            )
-                    else:
-                        import logging as _log
-                        _log.debug("[Drone] Gimbal telemetry stale — skipping EKF update")
+                self._update_drone_outer_loop(now, person_detected, target_info)
 
                 # --- FPS ---
                 self.frame_count += 1

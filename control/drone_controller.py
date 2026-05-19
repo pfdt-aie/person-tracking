@@ -128,6 +128,9 @@ class DroneController:
         self._fps_times: deque = deque(maxlen=self._s.fps_window_size)
         self._fps_warned: bool = False
 
+        # Low-battery warning (one print per session; reset on unfollow)
+        self._batt_low_warned: bool = False
+
         # RTL retry state
         self._rtl_attempts:    int   = 0
         self._rtl_last_t:      float = 0.0
@@ -212,6 +215,7 @@ class DroneController:
             # S3.3 — reset the session timer the moment the operator disarms.
             self._session_start_t   = -1.0
             self._session_rtl_issued = False
+            self._batt_low_warned   = False   # reset so next session warns fresh
             return 0.0
 
         now  = time.monotonic()
@@ -292,8 +296,16 @@ class DroneController:
             return 0.0
         self._sensor_warn_issued = False
 
-        # --- E2: Battery critical → RTL with fire-and-verify retry ---
+        # --- E1: Battery low → warn operator once per session ---
         batt_v = self._mav.get_battery_voltage()
+        if self._safety.is_battery_low(batt_v) and not self._batt_low_warned:
+            self._batt_low_warned = True
+            warn_v = self._s.cell_warn_mv / 1000.0
+            from utils import terminal as _t
+            _t.event(f"[Drone] ⚠ BATTERY LOW — land soon "
+                     f"({batt_v:.2f}V, warn threshold {warn_v:.2f}V/cell)")
+
+        # --- E2: Battery critical → RTL with fire-and-verify retry ---
         if self._safety.is_battery_critical(batt_v):
             if not self._rtl_confirmed:
                 if self._mav.get_mode() == "RTL":
@@ -830,7 +842,7 @@ class DroneController:
     # ------------------------------------------------------------------
 
     def reset(self) -> None:
-        """Reset controller state on re-acquisition, seeding EMA from live telemetry.
+        """Fully reset controller state, seeding EMA from live telemetry.
 
         Seeds _ema_vn/ve and _prev_vn/ve from current drone velocity so the
         jerk limiter starts from the actual motion state rather than zero,
@@ -855,3 +867,21 @@ class DroneController:
         self._session_rtl_issued = False
         self._rc_loss_loiter_issued = False
         self._ekf.reset()
+
+    def on_target_reacquired(self) -> None:
+        """Lightweight visual-reacquisition hook.
+
+        Unlike reset(), this preserves EKF continuity, session timers, retreat
+        state, and body-confirmation counters. It only seeds the velocity
+        smoother from live telemetry so the next follow command does not jump
+        after a brief detector dropout.
+        """
+        vn, ve, _ = self._mav.get_velocity_ned()
+        self._ema_vn = vn
+        self._ema_ve = ve
+        self._prev_vn = vn
+        self._prev_ve = ve
+        self._prev_an = 0.0
+        self._prev_ae = 0.0
+        self._loiter_issued = False
+        self._alert_issued = False
