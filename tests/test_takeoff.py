@@ -20,10 +20,10 @@ from tracking.tracker_state import TrackerState
 
 
 class _PreflightItem:
-    def __init__(self, name, ok):
-        self.name, self.ok = name, ok
+    def __init__(self, name, ok, outdoor_only=False):
+        self.name, self.ok, self.outdoor_only = name, ok, outdoor_only
     def to_dict(self):
-        return {"name": self.name, "ok": self.ok, "message": ""}
+        return {"name": self.name, "ok": self.ok, "message": "", "outdoor_only": self.outdoor_only}
 
 
 class _FakePreflight:
@@ -46,16 +46,18 @@ class _FakePreflight:
 class _FakeMav:
     """Just enough surface for _handle_takeoff to interact with."""
     def __init__(self, *, landed=True, mode="GUIDED",
-                 guided_ok=True, takeoff_ok=True):
+                 guided_ok=True, takeoff_ok=True, armed=True):
         self.landed    = landed
         self.mode      = mode
         self.guided_ok = guided_ok
         self.takeoff_ok = takeoff_ok
+        self.armed     = armed
         self.takeoff_calls: list[float] = []
         self.guided_calls = 0
 
     def is_landed(self):     return self.landed
     def get_mode(self):      return self.mode
+    def is_armed(self):      return self.armed
 
     def set_mode_guided(self):
         self.guided_calls += 1

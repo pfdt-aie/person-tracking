@@ -551,10 +551,6 @@ class OperatorInputController:
         for it in items:
             ok = bool(it.get("ok"))
             outdoor_only = bool(it.get("outdoor_only", False))
-            # Outdoor-only items that haven't passed yet are 'waiting' rather
-            # than 'failing' — they cannot pass on a bench and the operator
-            # should not chase them. The arm gate still requires ok=True for
-            # all items, so this is a display affordance only.
             if ok:
                 tag = "[OK]  "
                 passed += 1
@@ -571,8 +567,8 @@ class OperatorInputController:
             print(line)
         summary = f"  passed={passed}/{len(items)}"
         if waiting:
-            summary += (f"  ({waiting} waiting on GPS/HOME — "
-                        f"required for flight, not for bench)")
+            summary += (f"  ({waiting} waiting on GPS/HOME"
+                        f" — auto-bypassed by 'follow' once FCU is armed)")
         print(summary)
 
     # Display-window keyboard shortcuts that operators sometimes type at

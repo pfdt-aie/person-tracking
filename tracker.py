@@ -478,8 +478,15 @@ class PersonGimbalTracker:
                     "msg": "tracker launched without --drone"}
 
         items = self.preflight.run()
-        if not all(c.ok for c in items):
-            failing = ", ".join(c.name for c in items if not c.ok)
+        # When the FCU is already armed, ArduPilot has already verified GPS
+        # lock and HOME position (it will not arm without them).  Treat
+        # outdoor_only failures as advisory rather than blocking so the
+        # operator does not need to wait for the Jetson's own EKF stream to
+        # fill in after the FCU is already flying.
+        fcu_armed = self.mav.is_armed()
+        bad = [c for c in items if not c.ok and (not c.outdoor_only or not fcu_armed)]
+        if bad:
+            failing = ", ".join(c.name for c in bad)
             return {"following": False, "status": "error",
                     "msg": f"preflight failing: {failing}",
                     "items": [c.to_dict() for c in items]}
@@ -488,8 +495,13 @@ class PersonGimbalTracker:
         # so the controller can resume issuing commands.
         self.mav.clear_rc_override()
         self._ts.drone_following = True
-        print("[Follow] Drone-body following ENABLED — preflight all green")
-        safe_event("follow", checks_passed=len(items))
+        skipped = [c for c in items if not c.ok and c.outdoor_only and fcu_armed]
+        if skipped:
+            names = ", ".join(c.name for c in skipped)
+            print(f"[Follow] Drone-body following ENABLED — GPS/HOME bypassed (FCU armed): {names}")
+        else:
+            print("[Follow] Drone-body following ENABLED — preflight all green")
+        safe_event("follow", checks_passed=len(items) - len(skipped))
         return {"following": True, "status": "ok", "msg": "following",
                 "items": [c.to_dict() for c in items]}
 
@@ -542,8 +554,10 @@ class PersonGimbalTracker:
             time.sleep(0.5)   # let heartbeat refresh the local mode cache
 
         items = self.preflight.run()
-        if not all(c.ok for c in items):
-            failing = ", ".join(c.name for c in items if not c.ok)
+        fcu_armed = self.mav.is_armed()
+        bad = [c for c in items if not c.ok and (not c.outdoor_only or not fcu_armed)]
+        if bad:
+            failing = ", ".join(c.name for c in bad)
             return {"status": "error", "altitude_m": alt,
                     "msg": f"preflight failing: {failing}",
                     "items": [c.to_dict() for c in items]}
