@@ -157,7 +157,7 @@ class CameraGeolocation:
             (e.g. ray points upward away from ground).
         """
         if drone_alt_agl <= 0.5:
-            return None   # too low — projection unreliable
+            return None   # too low — ray-ground projection unreliable below 0.5 m
 
         self._ensure_intrinsics(frame_w, frame_h)
 
@@ -298,7 +298,8 @@ class PersonEKF:
             mah_sq  = float(innov @ S_inv @ innov)
             gate_sq = cfg.EKF_GATE_SIGMA ** 2
             if mah_sq > gate_sq:
-                # Outlier — reject and do not update
+                print(f"[EKF] Mahalanobis gate rejected: mah²={mah_sq:.1f} > {gate_sq:.1f} "
+                      f"— noisy projection or GPS error")
                 return False
         except np.linalg.LinAlgError:
             return False

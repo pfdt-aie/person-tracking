@@ -414,8 +414,6 @@ class DroneController:
             return pan_correction   # failsafe took control
 
         # --- S3.5: FPS floor ---
-        # Once we have enough samples, hold the body if the detector loop
-        # is too slow to drive commands safely. Gimbal continues tracking.
         fps = self.effective_fps()
         if fps > 0.0 and fps < self._s.min_tracking_fps:
             if not self._fps_warned:
@@ -437,10 +435,21 @@ class DroneController:
             self._fps_warned = False
 
         # --- S1.5: Body-movement confirmation gate ---
-        # Require BODY_MOVE_CONFIRM_FRAMES consecutive detections before
-        # any drone body velocity is sent. Holds hover otherwise. Gimbal
-        # tracking is unaffected (handled by tracker.py).
         if not self.is_body_confirmed():
+            if now - getattr(self, '_confirm_warn_t', 0.0) >= 2.0:
+                self._confirm_warn_t = now
+                print(f"[Drone] Body confirm: {self._confirm_count}/"
+                      f"{self._s.body_move_confirm_frames} consecutive detections "
+                      f"— holding until confirmed")
+            self._mav.send_zero_velocity()
+            return 0.0
+
+        # --- EKF validity ---
+        if not self._ekf.is_valid or not self._origin_set:
+            if now - getattr(self, '_ekf_warn_t', 0.0) >= 2.0:
+                self._ekf_warn_t = now
+                print("[Drone] EKF not yet initialised — waiting for first "
+                      "valid camera projection (needs alt > 0.5m and gimbal down)")
             self._mav.send_zero_velocity()
             return 0.0
 
@@ -453,30 +462,32 @@ class DroneController:
         # --- Drone yaw correction for gimbal pan ---
         pan_correction_rads = self._compute_yaw_correction(gimbal_pan_deg, dt)
 
-        # --- Target NED position with standoff ---
-        if not self._ekf.is_valid or not self._origin_set:
-            self._mav.send_zero_velocity()
-            return 0.0
-
-        pN, pE             = self._ekf.get_position_ned()        # 2-tuple (N, E)
+        pN, pE             = self._ekf.get_position_ned()
         drone_pN, drone_pE, _ = self._mav.get_position_ned()
 
         # S1.4 — Hard separation guard with active retreat + hysteresis.
         sep = math.hypot(pN - drone_pN, pE - drone_pE)
         self._last_person_sep_m = sep
         if self._should_retreat(sep):
+            if now - getattr(self, '_retreat_warn_t', 0.0) >= 2.0:
+                self._retreat_warn_t = now
+                print(f"[Drone] Person {sep:.1f}m from drone "
+                      f"(min {self._s.min_person_drone_sep_m:.0f}m) — retreating")
             self._send_retreat_velocity(pN, pE, drone_pN, drone_pE, sep)
             return 0.0
 
-        # S1.4 — Vertical separation guard.  Uses drone AGL altitude as the
-        # vertical clearance above the subject (assumes flat ground at home
-        # altitude; use the higher of configured follow altitude and minimum
-        # clearance to preserve margin on uneven ground.
+        # S1.4 — Vertical separation guard.
         alt_agl = self._mav.get_altitude_agl()
         self._last_vertical_clearance_m = alt_agl
         min_vertical_clearance = max(self._s.min_vertical_sep_m, self._s.follow_altitude_m)
         if alt_agl < min_vertical_clearance:
-            self._mav.send_velocity_ned(0.0, 0.0, -self._s.retreat_speed_ms)  # vD<0 = climb
+            if now - getattr(self, '_vclear_warn_t', 0.0) >= 3.0:
+                self._vclear_warn_t = now
+                print(f"[Drone] Altitude {alt_agl:.1f}m below follow minimum "
+                      f"{min_vertical_clearance:.0f}m — climbing "
+                      f"(min_vertical_sep={self._s.min_vertical_sep_m:.0f}m, "
+                      f"follow_alt={self._s.follow_altitude_m:.0f}m)")
+            self._mav.send_velocity_ned(0.0, 0.0, -self._s.retreat_speed_ms)
             return 0.0
 
         # S2.6 — Standoff bearing with hysteresis + slew-rate limit.
