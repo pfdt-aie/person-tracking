@@ -195,12 +195,12 @@ class VelocityTracker:
 
         Returns:
             yaw_dir:   +1 = right, -1 = left.
-            pitch_dir: +1 = down,  -1 = up.
+            pitch_dir: -1 = down,  +1 = up.
         """
         if not self.valid:
             return 1, 0
         yaw_dir   = 1 if self.vel_x >= 0 else -1
-        pitch_dir = 1 if self.vel_y >= 0 else -1
+        pitch_dir = -1 if self.vel_y >= 0 else 1
         return yaw_dir, pitch_dir
 
     # ------------------------------------------------------------------

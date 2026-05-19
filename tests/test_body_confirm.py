@@ -51,3 +51,34 @@ def test_confirm_count_does_not_overflow():
     for _ in range(cfg.BODY_MOVE_CONFIRM_FRAMES * 5):
         c.notify_detection(True)
     assert c._confirm_count == cfg.BODY_MOVE_CONFIRM_FRAMES
+
+
+def test_visual_reacquire_does_not_full_reset_follow_state():
+    class _Mav:
+        def get_velocity_ned(self):
+            return 0.4, -0.2, 0.0
+
+    class _Ekf:
+        def __init__(self):
+            self.reset_count = 0
+
+        def reset(self):
+            self.reset_count += 1
+
+    c = _controller()
+    c._mav = _Mav()
+    c._ekf = _Ekf()
+    c._confirm_count = cfg.BODY_MOVE_CONFIRM_FRAMES
+    c._session_start_t = 123.0
+    c._retreating = True
+    c._bearing_init = True
+
+    c.on_target_reacquired()
+
+    assert c._confirm_count == cfg.BODY_MOVE_CONFIRM_FRAMES
+    assert c._session_start_t == 123.0
+    assert c._retreating is True
+    assert c._bearing_init is True
+    assert c._ekf.reset_count == 0
+    assert c._ema_vn == 0.4
+    assert c._ema_ve == -0.2

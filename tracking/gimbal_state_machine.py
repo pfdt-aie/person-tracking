@@ -37,8 +37,8 @@ class GimbalStateMachine:
         init_scan:     InitialScanSearch.
         expand_search: ExpandingSquareSearch.
         lissajous:     LissajousSearch.
-        drone_ctrl:    Optional DroneController; if provided, reset() is called on
-                       re-acquisition from prediction phases.
+        drone_ctrl:    Optional DroneController; if provided, its lightweight
+                       visual reacquisition hook is called on re-acquisition.
     """
 
     def __init__(
@@ -77,6 +77,7 @@ class GimbalStateMachine:
         self._search_phase_start: float    = 0.0
         self._last_cmd_yaw_dir:   int      = 1
         self._last_cmd_pitch_dir: int      = 0
+        self._lissajous_ground_recover_until: float = 0.0
 
     # ------------------------------------------------------------------
     #  Public entry points
@@ -108,6 +109,7 @@ class GimbalStateMachine:
         self._target_lost_time       = None
         self._frames_without_person  = 0
         self._search_phase_start     = 0.0
+        self._lissajous_ground_recover_until = 0.0
 
         st.telem_error_x = st.telem_error_y = 0.0
         st.telem_yaw_cmd = st.telem_pitch_cmd = 0
@@ -193,18 +195,21 @@ class GimbalStateMachine:
 
     def _handle_searching(self) -> None:
         yaw, pitch = self._search.get_command()
+        yaw, pitch = self._apply_search_pitch_limits(yaw, pitch)
         self._ctrl.set_speed(yaw, pitch)
         st = self._state
         st.telem_yaw_cmd, st.telem_pitch_cmd = yaw, pitch
 
     def _handle_initial_scan(self) -> None:
         yaw, pitch = self._init_scan.get_command()
+        yaw, pitch = self._apply_search_pitch_limits(yaw, pitch)
         self._ctrl.set_speed(yaw, pitch)
         st = self._state
         st.telem_yaw_cmd, st.telem_pitch_cmd = yaw, pitch
 
     def _handle_expanding_square(self) -> None:
         yaw, pitch = self._expand.get_command()
+        yaw, pitch = self._apply_search_pitch_limits(yaw, pitch)
         self._ctrl.set_speed(yaw, pitch)
         st = self._state
         st.telem_yaw_cmd, st.telem_pitch_cmd = yaw, pitch
@@ -212,7 +217,12 @@ class GimbalStateMachine:
     def _handle_lissajous(self) -> None:
         if self._lissajous.needs_center_cmd:
             self._ctrl.center()
+            self._lissajous_ground_recover_until = (
+                time.time() + cfg.LISSAJOUS_RECENTER_DWELL + cfg.SEARCH_RECENTER_GROUND_TIMEOUT_S
+            )
         yaw, pitch = self._lissajous.get_command()
+        yaw, pitch = self._apply_lissajous_ground_recovery(yaw, pitch)
+        yaw, pitch = self._apply_search_pitch_limits(yaw, pitch)
         self._ctrl.set_speed(yaw, pitch)
         st = self._state
         st.telem_yaw_cmd, st.telem_pitch_cmd = yaw, pitch
@@ -234,7 +244,7 @@ class GimbalStateMachine:
                 self._expand.stop(); self._lissajous.stop()
                 st.state = State.TRACKING
                 if self._drone_ctrl is not None:
-                    self._drone_ctrl.reset()
+                    self._drone_ctrl.on_target_reacquired()
                 if prev in (State.PREDICTING, State.PRED_FADE):
                     edge = self._velocity.edge_exit
                     terminal.event(f"[State] Re-acquired from {prev}"
@@ -329,6 +339,34 @@ class GimbalStateMachine:
             self._sdz((cx - fw / 2) / (fw / 2), cfg.DEAD_ZONE),
             self._sdz((cy - fh / 2) / (fh / 2), cfg.DEAD_ZONE),
         )
+
+    def _apply_search_pitch_limits(self, yaw: int, pitch: int) -> tuple[int, int]:
+        """Clamp search pitch commands to the configured ground-looking envelope."""
+        return self._clamp_search_pitch_for_tilt(yaw, pitch, self._ctrl.gimbal_tilt_deg)
+
+    def _apply_lissajous_ground_recovery(self, yaw: int, pitch: int) -> tuple[int, int]:
+        """After center(), pitch back down to the shallow search bound."""
+        if self._lissajous_ground_recover_until <= 0.0:
+            return yaw, pitch
+
+        now = time.time()
+        if now >= self._lissajous_ground_recover_until:
+            self._lissajous_ground_recover_until = 0.0
+            return yaw, pitch
+
+        if self._ctrl.gimbal_tilt_deg <= cfg.SEARCH_PITCH_SHALLOW_DEG:
+            self._lissajous_ground_recover_until = 0.0
+            return yaw, pitch
+
+        return 0, -cfg.SEARCH_RECENTER_PITCH_SPEED
+
+    @staticmethod
+    def _clamp_search_pitch_for_tilt(yaw: int, pitch: int, tilt_deg: float) -> tuple[int, int]:
+        if pitch < 0 and tilt_deg <= cfg.SEARCH_PITCH_STEEP_DEG:
+            return yaw, 0
+        if pitch > 0 and tilt_deg >= cfg.SEARCH_PITCH_SHALLOW_DEG:
+            return yaw, 0
+        return yaw, pitch
 
     @staticmethod
     def _sdz(v: float, dz: float) -> float:

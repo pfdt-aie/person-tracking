@@ -68,6 +68,7 @@ class SIYIController:
         # --- Commanded angle fallback ---
         self._cmd_yaw_deg: float   = 0.0   # accumulated from speed commands
         self._cmd_pitch_deg: float = 0.0
+        self._last_angle_est_time: float = 0.0
 
         # --- Receive thread ---
         self._recv_running: bool = False
@@ -147,6 +148,9 @@ class SIYIController:
                 self._att_pitch_deg = raw_pitch / 10.0
                 self._att_roll_deg  = raw_roll  / 10.0
                 self._att_time      = time.monotonic()
+                self._cmd_yaw_deg   = self._att_yaw_deg
+                self._cmd_pitch_deg = self._att_pitch_deg
+                self._last_angle_est_time = time.time()
 
     # ------------------------------------------------------------------
     #  Attitude polling
@@ -303,6 +307,7 @@ class SIYIController:
         yaw   = max(-100, min(100, int(yaw)))
         pitch = max(-100, min(100, int(pitch)))
         now   = time.time()
+        self._integrate_commanded_attitude(now)
         if not force:
             if (
                 now - self._last_cmd_time < cfg.GIMBAL_CMD_MIN_INTERVAL
@@ -328,6 +333,25 @@ class SIYIController:
             self._last_pitch      = 0
             self._cmd_yaw_deg     = 0.0
             self._cmd_pitch_deg   = 0.0
+            self._last_angle_est_time = time.time()
+
+    def _integrate_commanded_attitude(self, now: float) -> None:
+        """Update fallback angle estimates from the previous speed command."""
+        with self.lock:
+            if self._last_angle_est_time <= 0.0:
+                self._last_angle_est_time = now
+                return
+            dt = max(0.0, min(cfg.GIMBAL_CMD_EST_MAX_DT_S, now - self._last_angle_est_time))
+            self._last_angle_est_time = now
+            scale = cfg.GIMBAL_SPEED_FULL_SCALE_DEG_S / 100.0
+            self._cmd_yaw_deg = max(
+                cfg.GIMBAL_PAN_MIN_DEG,
+                min(cfg.GIMBAL_PAN_MAX_DEG, self._cmd_yaw_deg + self._last_yaw * scale * dt),
+            )
+            self._cmd_pitch_deg = max(
+                cfg.GIMBAL_TILT_MIN_DEG,
+                min(cfg.GIMBAL_TILT_MAX_DEG, self._cmd_pitch_deg + self._last_pitch * scale * dt),
+            )
 
     # ------------------------------------------------------------------
     #  Zoom commands

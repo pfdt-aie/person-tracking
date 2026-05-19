@@ -42,6 +42,7 @@ class PersonRegistry:
         cx: float,
         cy: float,
         now: float,
+        exclude_pids: set[int] | None = None,
     ) -> int:
         """Return the persistent ID for this detection.
 
@@ -50,27 +51,38 @@ class PersonRegistry:
             crop: BGR numpy array of the person's bounding box region.
             cx, cy: Centre pixel coordinates (unused, reserved for future use).
             now: Current timestamp (time.time()).
+            exclude_pids: Persistent IDs already assigned in the current frame.
 
         Returns:
             Stable persistent ID for this person.
         """
         hist = self._compute_hist(crop)
+        exclude_pids = exclude_pids or set()
 
         # Known ByteTrack ID → fast path (no gallery search)
         if bytetrack_id in self._bt_to_pid:
             pid   = self._bt_to_pid[bytetrack_id]
-            entry = self._gallery[pid]
-            entry['hist'] = 0.7 * entry['hist'] + 0.3 * hist
-            norm = np.linalg.norm(entry['hist'])
-            if norm > 0:
-                entry['hist'] /= norm
-            entry['last_seen'] = now
-            entry['active']    = True
-            return pid
+            entry = self._gallery.get(pid)
+            if entry is not None and pid not in exclude_pids:
+                hist_norm = np.linalg.norm(hist)
+                entry_norm = np.linalg.norm(entry['hist'])
+                if hist_norm > 0 and entry_norm > 0:
+                    sim = float(np.dot(hist, entry['hist']))
+                else:
+                    sim = 0.0
+                if sim >= cfg.REID_KNOWN_ID_MIN_SIM:
+                    self._update_entry(entry, hist, now)
+                    return pid
+            # ByteTrack IDs can be recycled after occlusion or tracker fallback.
+            # Drop the stale mapping and let gallery matching/new-ID allocation
+            # below decide where this detection belongs.
+            self._bt_to_pid.pop(bytetrack_id, None)
 
         # New ByteTrack ID → try re-identification via gallery
         best_pid, best_sim = None, 0.0
         for pid, entry in self._gallery.items():
+            if pid in exclude_pids:
+                continue
             sim = float(np.dot(hist, entry['hist']))   # cosine (both normalised)
             if sim > best_sim:
                 best_sim, best_pid = sim, pid
@@ -78,12 +90,7 @@ class PersonRegistry:
         if best_pid is not None and best_sim >= cfg.REID_SIM_THRESHOLD:
             self._bt_to_pid[bytetrack_id] = best_pid
             entry = self._gallery[best_pid]
-            entry['hist'] = 0.7 * entry['hist'] + 0.3 * hist
-            norm = np.linalg.norm(entry['hist'])
-            if norm > 0:
-                entry['hist'] /= norm
-            entry['last_seen'] = now
-            entry['active']    = True
+            self._update_entry(entry, hist, now)
             return best_pid
 
         # Genuinely new person
@@ -96,6 +103,15 @@ class PersonRegistry:
             'active':    True,
         }
         return pid
+
+    @staticmethod
+    def _update_entry(entry: dict, hist: np.ndarray, now: float) -> None:
+        entry['hist'] = 0.7 * entry['hist'] + 0.3 * hist
+        norm = np.linalg.norm(entry['hist'])
+        if norm > 0:
+            entry['hist'] /= norm
+        entry['last_seen'] = now
+        entry['active'] = True
 
     def mark_inactive(self, active_bytetrack_ids: set) -> None:
         """Mark gallery entries not currently visible as inactive; prune stale ones."""

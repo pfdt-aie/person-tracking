@@ -195,6 +195,9 @@ def test_handle_follow_unfollow_emits_event_when_transitioning(monkeypatch):
     t = _tracker()    # starts following
     result = t._handle_follow(False)
     assert result["msg"] == "stopped"
+    assert t._ts.drone_following is False
+    assert t.drone_ctrl.reset_calls == 1
+    assert t.mav.calls == ["zero"]
     unfollow = [e for e in log.events if e[0] == "unfollow"]
     assert len(unfollow) == 1
     assert unfollow[0][1].get("source") == "operator"

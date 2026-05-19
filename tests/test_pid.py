@@ -56,6 +56,69 @@ def test_dead_zone_sdz():
     assert GimbalStateMachine._sdz(0.1, 0.1) == 0.0
 
 
+def test_search_pitch_clamp_stops_down_at_steep_limit():
+    import config as cfg
+    from tracking.gimbal_state_machine import GimbalStateMachine
+
+    yaw, pitch = GimbalStateMachine._clamp_search_pitch_for_tilt(
+        12, -8, cfg.SEARCH_PITCH_STEEP_DEG - 1.0
+    )
+
+    assert yaw == 12
+    assert pitch == 0
+
+
+def test_search_pitch_clamp_stops_up_at_shallow_limit():
+    import config as cfg
+    from tracking.gimbal_state_machine import GimbalStateMachine
+
+    yaw, pitch = GimbalStateMachine._clamp_search_pitch_for_tilt(
+        12, 8, cfg.SEARCH_PITCH_SHALLOW_DEG + 1.0
+    )
+
+    assert yaw == 12
+    assert pitch == 0
+
+
+def test_search_pitch_clamp_allows_motion_inside_envelope():
+    from tracking.gimbal_state_machine import GimbalStateMachine
+
+    assert GimbalStateMachine._clamp_search_pitch_for_tilt(12, -8, -45.0) == (12, -8)
+    assert GimbalStateMachine._clamp_search_pitch_for_tilt(12, 8, -45.0) == (12, 8)
+
+
+def test_lissajous_ground_recovery_pitches_down_above_shallow_limit():
+    import config as cfg
+    from tracking.gimbal_state_machine import GimbalStateMachine
+
+    class _Ctrl:
+        gimbal_tilt_deg = 0.0
+
+    gsm = GimbalStateMachine.__new__(GimbalStateMachine)
+    gsm._ctrl = _Ctrl()
+    gsm._lissajous_ground_recover_until = time.time() + 1.0
+
+    assert gsm._apply_lissajous_ground_recovery(14, 0) == (
+        0,
+        -cfg.SEARCH_RECENTER_PITCH_SPEED,
+    )
+
+
+def test_lissajous_ground_recovery_ends_at_shallow_limit():
+    import config as cfg
+    from tracking.gimbal_state_machine import GimbalStateMachine
+
+    class _Ctrl:
+        gimbal_tilt_deg = cfg.SEARCH_PITCH_SHALLOW_DEG - 1.0
+
+    gsm = GimbalStateMachine.__new__(GimbalStateMachine)
+    gsm._ctrl = _Ctrl()
+    gsm._lissajous_ground_recover_until = time.time() + 1.0
+
+    assert gsm._apply_lissajous_ground_recovery(14, 0) == (14, 0)
+    assert gsm._lissajous_ground_recover_until == 0.0
+
+
 def test_target_smoother_converges():
     sm = TargetSmoother()
     for _ in range(30):

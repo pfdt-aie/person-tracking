@@ -23,6 +23,8 @@ class TargetDetection:
         y2:       Pixel bottom edge of bounding box.
         conf:     YOLO detection confidence [0, 1].
         track_id: Persistent person ID assigned by PersonRegistry.
+        is_fresh: True when this came from the current detector frame; False
+                  when it is a short grace/coast target.
     """
     cx:       float
     cy:       float
@@ -32,6 +34,7 @@ class TargetDetection:
     y2:       float
     conf:     float
     track_id: int
+    is_fresh: bool = True
 
     @property
     def bbox_w(self) -> float:
