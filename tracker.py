@@ -54,6 +54,7 @@ from tracking.tracker_state import TrackerState
 from tracking.velocity_tracker import VelocityTracker
 from utils.flight_log import safe_event
 from utils.frame_grabber import FrameGrabber
+from utils import terminal
 from utils.video_recorder import VideoRecorder
 
 
@@ -802,11 +803,11 @@ class PersonGimbalTracker:
                             f"ID {t}@({d.cx:.0f},{d.cy:.0f})" for t, d in id_snap.items())
                         lock_str = (f"  [locked={ts.lock_id}]"
                                     if ts.lock_id is not None else "")
-                        print(f"[IDs] {id_str}{lock_str}  | 'track <id>' to lock")
+                        terminal.status(f"[IDs] {id_str}{lock_str}  | 'track <id>' to lock")
                     elif not id_snap and self._last_id_signature:
                         # IDs went from "something" to nothing — note it once.
                         self._last_id_signature = ()  # falsy → won't re-trigger until next detection
-                        print("[IDs] (none detected)")
+                        terminal.event("[IDs] (none detected)")
 
                 # --- Gimbal state machine (inner loop ~30 Hz) ---
                 if ts.mode == "AUTO":

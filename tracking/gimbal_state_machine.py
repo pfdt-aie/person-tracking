@@ -17,6 +17,7 @@ import config as cfg
 from tracking.state_machine import State
 from tracking.target_detection import TargetDetection
 from tracking.tracker_state import TrackerState
+from utils import terminal
 
 
 class GimbalStateMachine:
@@ -236,11 +237,11 @@ class GimbalStateMachine:
                     self._drone_ctrl.reset()
                 if prev in (State.PREDICTING, State.PRED_FADE):
                     edge = self._velocity.edge_exit
-                    print(f"[State] Re-acquired from {prev}"
-                          f"{f' (edge:{edge})' if edge else ''}")
+                    terminal.event(f"[State] Re-acquired from {prev}"
+                                   f"{f' (edge:{edge})' if edge else ''}")
                 elif prev in State.SEARCH_STATES:
                     self._velocity.reset()
-                    print(f"[State] Found during {prev}")
+                    terminal.event(f"[State] Found during {prev}")
             self._target_lost_time = None
             return
 
@@ -258,14 +259,14 @@ class GimbalStateMachine:
             if use_vel:
                 st.state = State.PREDICTING
                 edge = self._velocity.edge_exit
-                print(f"[State] Lost → PREDICTING (vel={self._velocity.speed:.2f}/s"
-                      f"{f', edge:{edge}' if edge else ''})")
+                terminal.event(f"[State] Lost → PREDICTING (vel={self._velocity.speed:.2f}/s"
+                               f"{f', edge:{edge}' if edge else ''})")
             elif st.search_enabled:
                 self._search.start(yaw_dir=self._last_cmd_yaw_dir, pitch_dir=self._last_cmd_pitch_dir)
                 st.state = State.SEARCHING
                 self._search_phase_start = now
                 dir_label = 'R' if self._last_cmd_yaw_dir > 0 else 'L'
-                print(f"[State] Lost → SEARCHING (no velocity, dir={dir_label})")
+                terminal.event(f"[State] Lost → SEARCHING (no velocity, dir={dir_label})")
             else:
                 st.state = State.WAITING
                 self._ctrl.stop()
@@ -273,7 +274,7 @@ class GimbalStateMachine:
         elif st.state == State.PREDICTING:
             if now - self._target_lost_time > cfg.PREDICT_DURATION:  # type: ignore[operator]
                 st.state = State.PRED_FADE
-                print("[State] PREDICTING → PRED_FADE")
+                terminal.event("[State] PREDICTING → PRED_FADE")
 
         elif st.state == State.PRED_FADE:
             if now - self._target_lost_time > cfg.PREDICT_DURATION + cfg.PRED_FADE_DURATION:  # type: ignore[operator]
@@ -286,7 +287,7 @@ class GimbalStateMachine:
                     self._search.start(yaw_dir=yaw_dir, pitch_dir=pitch_dir)
                     st.state = State.SEARCHING
                     self._search_phase_start = now
-                    print("[State] PRED_FADE → SEARCHING")
+                    terminal.event("[State] PRED_FADE → SEARCHING")
                 else:
                     st.state = State.WAITING
 
@@ -296,7 +297,7 @@ class GimbalStateMachine:
                 self._expand.start(yaw_dir=self._last_cmd_yaw_dir, pitch_dir=self._last_cmd_pitch_dir)
                 st.state = State.EXPANDING_SQUARE
                 self._search_phase_start = now
-                print("[State] SEARCHING → EXPANDING_SQUARE")
+                terminal.event("[State] SEARCHING → EXPANDING_SQUARE")
 
         elif st.state == State.EXPANDING_SQUARE:
             if st.search_enabled and now - self._search_phase_start >= cfg.EXPAND_SEARCH_TIMEOUT:
@@ -304,7 +305,7 @@ class GimbalStateMachine:
                 self._lissajous.start()
                 st.state = State.LISSAJOUS
                 self._search_phase_start = now
-                print("[State] EXPANDING_SQUARE → LISSAJOUS")
+                terminal.event("[State] EXPANDING_SQUARE → LISSAJOUS")
 
     # ------------------------------------------------------------------
     #  Adaptive speed + error helpers

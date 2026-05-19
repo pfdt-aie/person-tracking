@@ -19,6 +19,7 @@ import config as cfg
 from tracking.state_machine import State
 from tracking.tracker_state import TrackerState
 from utils.flight_log import safe_event
+from utils import terminal
 
 
 # Window for the E-STOP double-tap escalation in the SSH stdin loop.
@@ -248,7 +249,7 @@ class OperatorInputController:
                             print(f"  ID {tid:3d}  center=({d.cx:.0f},{d.cy:.0f})"
                                   f"  conf={d.conf:.2f}{marker}")
                     else:
-                        print("[IDs] No persons currently detected")
+                        terminal.event("[IDs] No persons currently detected")
 
                 # --- Gimbal pulses + center ---
                 elif line.startswith("zoom "):

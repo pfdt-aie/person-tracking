@@ -22,6 +22,7 @@ from dataclasses import dataclass
 import config as cfg
 from config.settings import Settings, load_settings
 from utils.flight_log import safe_event
+from utils import terminal
 
 
 #  Geofence definition
@@ -90,7 +91,7 @@ class SafetyMonitor:
         with self._lock:
             self._fence.centre_lat = lat
             self._fence.centre_lon = lon
-        print(f"[Safety] Geofence centre set: ({lat:.6f}, {lon:.6f})")
+        terminal.event(f"[Safety] Geofence centre set: ({lat:.6f}, {lon:.6f})")
 
     def set_cell_count(self, n_cells: int) -> None:
         """Update detected battery cell count (called by MAVLinkClient).
@@ -101,9 +102,9 @@ class SafetyMonitor:
         if 3 <= n_cells <= 6:
             with self._lock:
                 self._n_cells = n_cells
-            print(f"[Safety] Battery: {n_cells}S detected")
+            terminal.event(f"[Safety] Battery: {n_cells}S detected")
         else:
-            print(f"[Safety] WARNING: implausible cell count {n_cells} — ignoring")
+            terminal.event(f"[Safety] WARNING: implausible cell count {n_cells} — ignoring")
 
   
     #  Rule 1: Altitude floor / ceiling
@@ -345,5 +346,5 @@ class SafetyMonitor:
     def _log(self, msg: str) -> None:
         """Print a safety violation to the terminal and emit a structured event."""
         ts = time.strftime("%H:%M:%S")
-        print(f"[Safety] {ts} WARNING: {msg}")
+        terminal.event(f"[Safety] {ts} WARNING: {msg}")
         safe_event("safety_warning", message=msg)
