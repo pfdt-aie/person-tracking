@@ -389,6 +389,18 @@ class MAVLinkClient:
         except Exception:
             pass
 
+    def request_home_position(self) -> None:
+        """Re-request HOME_POSITION from ArduPilot (public retry path).
+
+        Called by DroneController when home has not been received yet.
+        Safe to call repeatedly; the FCU will respond with a HOME_POSITION
+        message which the rx_loop will pick up and set _home_set = True.
+        No-op in ground-test mode (HOME is bypassed there).
+        """
+        if self._ground_test:
+            return
+        self._read_home_position()
+
     # ------------------------------------------------------------------
     #  HEARTBEAT handler (filtered to the autopilot component only)
     # ------------------------------------------------------------------
