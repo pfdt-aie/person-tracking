@@ -244,7 +244,18 @@ class GimbalStateMachine:
                 self._expand.stop(); self._lissajous.stop()
                 st.state = State.TRACKING
                 if self._drone_ctrl is not None:
-                    self._drone_ctrl.on_target_reacquired()
+                    if prev in State.SEARCH_STATES:
+                        # Long search: EKF has been in predict-only for up to 66s
+                        # and the estimate has drifted far from reality.  Full
+                        # reset + new GPS origin so the first velocity command
+                        # after re-acquisition is based on fresh projection data,
+                        # not a stale 66-second-old position.
+                        self._drone_ctrl.reset()
+                        self._drone_ctrl.clear_origin()
+                    else:
+                        # Brief loss (PREDICTING/PRED_FADE): preserve EKF
+                        # continuity — only seed the velocity smoother.
+                        self._drone_ctrl.on_target_reacquired()
                 if prev in (State.PREDICTING, State.PRED_FADE):
                     edge = self._velocity.edge_exit
                     terminal.event(f"[State] Re-acquired from {prev}"

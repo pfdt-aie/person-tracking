@@ -67,7 +67,10 @@ EDGE_MARGIN_RATIO: float     = 0.05   # Bbox within 5% of frame edge = edge exit
 # =============================================================================
 
 SEARCH_ENABLED: bool            = True
-SEARCH_SPEED: int               = 18
+# SEARCH_SPEED in SIYI units (0–100); GIMBAL_SPEED_FULL_SCALE_DEG_S = 60°/s at 100.
+# At speed=18 → 10.8°/s × 3.0s sweep = ±32° arc (was HALF the intended ±60°).
+# At speed=33 → 19.8°/s × 3.0s = ±59° ≈ the documented SEARCH_PHASE1_ARC=120°.
+SEARCH_SPEED: int               = 33
 SEARCH_PHASE1_ARC: int          = 120
 SEARCH_PHASE2_ARC: int          = 180
 SEARCH_PHASE1_SWEEPS: int       = 2
@@ -75,7 +78,7 @@ SEARCH_PHASE2_SWEEPS: int       = 2
 SEARCH_SWEEP_DURATION: float    = 3.0
 SEARCH_PITCH_SCAN_SPEED: int    = 10
 SEARCH_PITCH_SCAN_DURATION: float = 2.0
-SEARCH_FALLBACK_SPEED: int      = 25
+SEARCH_FALLBACK_SPEED: int      = 40   # was 25 → 24°/s for ±72° fallback arc
 
 # =============================================================================
 #  ZOOM (A8 mini digital zoom)
@@ -154,7 +157,7 @@ STREAM_QUALITY_LO: int = 55      # JPEG quality for 480p stream
 # Reference: Scientific Reports 2024, IAMSAR, MDPI Drones 2024
 
 # --- Initial Acquisition Scan (3-level raster, MDPI Drones 2024) ---
-INIT_SCAN_SPEED: int              = 12
+INIT_SCAN_SPEED: int              = 20   # was 12 → 7.2°/s; now 20 → 12°/s for faster acquisition
 INIT_SCAN_SWEEP_TIME: float       = 4.5
 INIT_SCAN_SWEEPS_PER_LEVEL: int   = 2
 INIT_SCAN_PITCH_STEP_TIME: float  = 1.2
@@ -169,7 +172,7 @@ EXP_SQUARE_BASE_TIME: float = 4.0
 EXP_SQUARE_MAX_ARMS: int    = 8
 
 # --- Search phase timeouts ---
-SECTOR_SEARCH_TIMEOUT: float = 15.0   # s in sector scan before → expanding square
+SECTOR_SEARCH_TIMEOUT: float = 30.0   # was 15s — at new speed, full 3-phase scan takes ~25s
 EXPAND_SEARCH_TIMEOUT: float = 45.0   # s in expanding square before → Lissajous
 
 # --- Search pitch envelope ---

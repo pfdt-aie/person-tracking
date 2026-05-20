@@ -735,6 +735,23 @@ class PersonGimbalTracker:
                 ts.telem_pitch_cmd,
             )
 
+        # During search: if gimbal is panned significantly off-centre the drone
+        # yaws to face that direction, keeping the gimbal centred for wider coverage.
+        # Without this the gimbal hits its ±160° hard limit and search stalls.
+        if (self._drone_enabled
+                and ts.drone_following
+                and ts.mode == "AUTO"
+                and ts.state in State.SEARCH_STATES
+                and attitude_fresh
+                and abs(pan_deg) > cfg.GIMBAL_PAN_SOFT_DEG):
+            pan_correction = self.drone_ctrl._compute_yaw_correction(pan_deg, 0.1)
+            if pan_correction != 0.0:
+                correction_speed = int(pan_correction * (180.0 / math.pi))
+                self.ctrl.set_speed(
+                    max(-100, min(100, ts.telem_yaw_cmd + correction_speed)),
+                    ts.telem_pitch_cmd,
+                )
+
     # ------------------------------------------------------------------
     #  Safe shutdown
     # ------------------------------------------------------------------
