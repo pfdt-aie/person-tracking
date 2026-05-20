@@ -728,7 +728,11 @@ class PersonGimbalTracker:
             ),
         )
         if pan_correction != 0.0 and ts.state == State.TRACKING:
-            correction_speed = int(pan_correction * (180.0 / math.pi))
+            # pan_correction is rad/s; SIYI units = deg/s * (100 / full_scale_deg_s).
+            # Missing the (100/60) factor was causing ~40% under-compensation.
+            correction_speed = int(
+                math.degrees(pan_correction) * 100.0 / cfg.GIMBAL_SPEED_FULL_SCALE_DEG_S
+            )
             self.ctrl.set_speed(
                 max(-100, min(100, ts.telem_yaw_cmd + correction_speed)),
                 ts.telem_pitch_cmd,
@@ -745,7 +749,9 @@ class PersonGimbalTracker:
                 and abs(pan_deg) > cfg.GIMBAL_PAN_SOFT_DEG):
             pan_correction = self.drone_ctrl._compute_yaw_correction(pan_deg, 0.1)
             if pan_correction != 0.0:
-                correction_speed = int(pan_correction * (180.0 / math.pi))
+                correction_speed = int(
+                    math.degrees(pan_correction) * 100.0 / cfg.GIMBAL_SPEED_FULL_SCALE_DEG_S
+                )
                 self.ctrl.set_speed(
                     max(-100, min(100, ts.telem_yaw_cmd + correction_speed)),
                     ts.telem_pitch_cmd,
@@ -896,7 +902,7 @@ class PersonGimbalTracker:
                         frame, cfg.CONF_THRESHOLD, cfg.IMGSZ
                     )
                     target_info     = self._selector.select(results, ts)
-                    person_detected = target_info is not None
+                    person_detected = target_info is not None and target_info.is_fresh
                     self._latest_target_info = target_info
 
                 # Headless ID report — print only when the ID set or lock state

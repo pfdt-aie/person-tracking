@@ -165,11 +165,19 @@ class CameraGeolocation:
         px = (bbox_x1 + bbox_x2) / 2.0
         py = bbox_y2   # bottom of box = feet
 
-        # 2. Pixel → normalised camera ray
+        # 2. Pixel → normalised camera ray (body-aligned convention)
+        # Components map directly to body-frame axes at zero tilt/pan:
+        #   [0] = forward (body X) — optical axis depth
+        #   [1] = right   (body Y) — horizontal pixel offset
+        #   [2] = down    (body Z) — vertical pixel offset (down in image = down in body)
+        # This avoids the coordinate-axis swap that occurs with the OpenCV
+        # [dx/fx, dy/fy, 1] convention when fed directly into the gimbal
+        # Ry rotation (which would mismap horizontal offsets to North and
+        # vertical offsets to East).
         ray_cam = np.array([
+            1.0,
             (px  - self._cx) / self._fx,
             (py  - self._cy) / self._fy,
-            1.0,
         ], dtype=float)
         ray_cam /= np.linalg.norm(ray_cam)
 
@@ -177,8 +185,10 @@ class CameraGeolocation:
         ray_gimbal = ray_cam
 
         # 4. Gimbal → body frame
-        # SIYI convention: pan = Z rotation, tilt = Y rotation
-        R_g2b  = self._Rz(gimbal_pan_rad) @ self._Ry(-gimbal_tilt_rad)
+        # Tilt rotates the forward axis (body X) toward down (body Z).
+        # gimbal_tilt_rad is negative when looking down, so Ry(tilt_rad)
+        # correctly rotates forward→down for tilt<0.
+        R_g2b  = self._Rz(gimbal_pan_rad) @ self._Ry(gimbal_tilt_rad)
         ray_body = R_g2b @ ray_gimbal
 
         # 5. Body → NED frame

@@ -14,7 +14,7 @@ GIMBAL_PORT: int = 37260
 RTSP_URL: str    = "rtsp://192.168.144.25:8554/main.264"
 
 MODEL_PATH: str       = "models/yolo26s.engine"
-CONF_THRESHOLD: float = 0.25   # was 0.35→0.30→0.25; alternating detect/miss in logs = threshold too high
+CONF_THRESHOLD: float = 0.30   # alternating detect/miss was fixed by BODY_CONFIRM_WINDOW_S; 0.25 increased false positives unnecessarily
 IMGSZ: int            = 640
 DETECT_DEVICE: str    = "auto"   # "auto" | "cpu" | "cuda:0" | "0"
 
@@ -97,7 +97,7 @@ ZOOM_CMD_INTERVAL: float         = 0.3
 LOST_CONFIRM_FRAMES: int    = 6    # Consecutive missed frames before "lost" (~200ms at 30fps)
 MIN_VELOCITY_PREDICT: float = 0.05 # vel below this → skip PREDICTING
 ID_REPORT_INTERVAL: float   = 2.0  # Seconds between ID prints (headless)
-LOCK_TARGET_GRACE_S: float  = 1.5  # Keep a locked target through brief detector dropouts
+LOCK_TARGET_GRACE_S: float  = 0.4  # Keep a locked target through brief detector dropouts (~10 frames at 25fps); 1.5s was too long — held stale position for a walking target
 LOCK_REACQUIRE_CENTER_RATIO: float = 0.25  # Max centre jump as fraction of frame diagonal
 LOCK_REACQUIRE_STRICT_CENTER_RATIO: float = 0.08  # Allow no-overlap reacquire only very nearby
 LOCK_REACQUIRE_MIN_IOU: float = 0.05  # Otherwise require some bbox overlap before remapping lock

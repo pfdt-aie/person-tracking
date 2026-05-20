@@ -493,6 +493,7 @@ class DroneController:
         # the person at 7m altitude (safe in 3D) does not trigger a retreat.
         # sep is horizontal-only; sep_3d adds drone altitude (person assumed
         # at ground level, drone at alt_agl above).
+        alt_agl = self._mav.get_altitude_agl()   # must be before sep_3d — was erroneously placed after
         sep_3d = math.hypot(sep, alt_agl)
         self._last_person_sep_m = sep_3d
         if self._should_retreat(sep_3d):
@@ -509,7 +510,6 @@ class DroneController:
             return 0.0
 
         # S1.4 — Vertical clearance guard (0.5 m hysteresis prevents GPS-noise oscillation)
-        alt_agl = self._mav.get_altitude_agl()
         self._last_vertical_clearance_m = alt_agl
         min_vert = max(self._s.min_vertical_sep_m, self._s.follow_altitude_m)
         # Use a lower trigger threshold so GPS noise (±0.5 m) at target altitude
@@ -1096,6 +1096,10 @@ class DroneController:
         # Preserve session timer across reset() — it only resets when FCU disarms.
         # This prevents the operator bypassing the 10-min cap via unfollow+follow.
         self._rc_loss_loiter_issued = False
+        # Zero _last_update so the first update() call after re-enabling follow
+        # uses the 0.1s default dt rather than the wall-clock gap since the last
+        # active update tick (which could be tens of seconds during a pause).
+        self._last_update = 0.0
         self._ekf.reset()
 
     def clear_origin(self) -> None:

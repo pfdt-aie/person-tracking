@@ -28,3 +28,4 @@ gpu_frame_*.jpg
 *.engine.tmp
 *.onnx.tmp
 
+research.docx
