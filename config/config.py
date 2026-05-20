@@ -306,7 +306,7 @@ GIMBAL_TILT_MAX_DEG: float = 45.0
 EKF_PROCESS_NOISE: list = [0.2, 0.2, 1.5, 1.5]   # Q diag — was [0.1,0.1,0.5,0.5]; raised velocity to track direction changes faster
 EKF_MEAS_NOISE:    list = [2.0, 2.0]              # R diag: [pN, pE] (m²)
 EKF_GATE_SIGMA:    float = 3.0                    # Mahalanobis gate (σ)
-EKF_MAX_JUMP_M:    float = 30.0                   # Jump rejection — was 10m, raised so drone movement during LOITER doesn't reject all updates
+EKF_MAX_JUMP_M:    float = 50.0                   # Jump rejection — raised from 30m; close-range projections at steep angles produce large apparent jumps
 
 # =============================================================================
 #  CAMERA INTRINSICS

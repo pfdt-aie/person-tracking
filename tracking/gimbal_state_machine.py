@@ -245,13 +245,13 @@ class GimbalStateMachine:
                 st.state = State.TRACKING
                 if self._drone_ctrl is not None:
                     if prev in State.SEARCH_STATES:
-                        # Long search: EKF has been in predict-only for up to 66s
-                        # and the estimate has drifted far from reality.  Full
-                        # reset + new GPS origin so the first velocity command
-                        # after re-acquisition is based on fresh projection data,
-                        # not a stale 66-second-old position.
+                        # Long search: reset EKF and smoother so the first
+                        # velocity command after re-acquisition is driven by
+                        # fresh projection data, not a stale estimate.
+                        # Do NOT clear the NED origin — keeping the same GPS
+                        # reference frame prevents repeated origin resets that
+                        # destabilise EKF position and cause yaw oscillations.
                         self._drone_ctrl.reset()
-                        self._drone_ctrl.clear_origin()
                     else:
                         # Brief loss (PREDICTING/PRED_FADE): preserve EKF
                         # continuity — only seed the velocity smoother.

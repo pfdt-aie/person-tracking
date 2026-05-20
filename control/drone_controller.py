@@ -498,12 +498,17 @@ class DroneController:
         sep = math.hypot(dn, de)
         self._last_person_sep_m = sep
 
-        # S1.4 — Separation guard: retreat if inside MIN_PERSON_DRONE_SEP_M
-        if self._should_retreat(sep):
+        # S1.4 — Separation guard: use 3D distance so drone hovering above
+        # the person at 7m altitude (safe in 3D) does not trigger a retreat.
+        # sep is horizontal-only; sep_3d adds drone altitude (person assumed
+        # at ground level, drone at alt_agl above).
+        sep_3d = math.hypot(sep, alt_agl)
+        self._last_person_sep_m = sep_3d
+        if self._should_retreat(sep_3d):
             if now - getattr(self, '_retreat_warn_t', 0.0) >= 2.0:
                 self._retreat_warn_t = now
-                print(f"[Drone] Person {sep:.1f}m from drone "
-                      f"(min {self._s.min_person_drone_sep_m:.0f}m) — retreating")
+                print(f"[Drone] 3D sep {sep_3d:.1f}m (horiz={sep:.1f}m alt={alt_agl:.1f}m) "
+                      f"< min {self._s.min_person_drone_sep_m:.0f}m — retreating")
             if sep > 0.01:
                 self._mav.send_velocity_ned(
                     -dn / sep * self._s.retreat_speed_ms,
@@ -579,24 +584,19 @@ class DroneController:
             self._ema_vn  = max(-max_v, min(max_v, self._ema_vn))
             self._ema_ve  = max(-max_v, min(max_v, self._ema_ve))
 
-        # Drone heading: face the person.  Without this the drone flies
-        # sideways relative to its heading, forcing the gimbal to pan large
-        # amounts continuously and hitting its ±160° limit.  With it the
-        # gimbal stays nearly centred and the flight looks natural.
-        target_yaw = math.atan2(de, dn) if sep > 1.0 else None
-
-        # Confirmation log every 3 s — shows the ACTUAL sent velocity (post-cap).
+        # Confirmation log every 3 s.
         if now - getattr(self, '_follow_log_t', 0.0) >= 3.0:
             self._follow_log_t = now
-            yaw_str = (f"yaw={math.degrees(target_yaw):.0f}°"
-                       if target_yaw is not None else "yaw=hold")
-            print(f"[Drone] Following ✓  vel=({vN:.2f},{vE:.2f}) m/s  {yaw_str}  "
+            print(f"[Drone] Following ✓  vel=({vN:.2f},{vE:.2f}) m/s  "
                   f"person={sep:.1f}m  to_target={target_dist:.1f}m  "
                   f"alt={alt_agl:.1f}m")
 
-        # Send VELOCITY + YAW — velocity from GPS is always correct direction,
-        # yaw target keeps the drone facing the person.
-        self._mav.send_velocity_ned(vN, vE, 0.0, yaw_rad=target_yaw)
+        # Send velocity only — no absolute yaw target.
+        # Absolute yaw (atan2 of GPS direction) is unreliable at close range:
+        # 1m GPS noise at 2m distance = 30° error → drone spins.
+        # Drone yaw is handled by _compute_yaw_correction (gimbal-pan-based)
+        # which gently rotates the drone when gimbal pan exceeds 60°.
+        self._mav.send_velocity_ned(vN, vE, 0.0)
         return pan_correction_rads
 
     # ------------------------------------------------------------------

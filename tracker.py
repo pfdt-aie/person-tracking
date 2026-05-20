@@ -494,13 +494,12 @@ class PersonGimbalTracker:
                 if self.mav.get_mode() != "GUIDED":
                     print(f"[Follow] FCU in {self.mav.get_mode()} — switching to GUIDED")
                     self.mav.set_mode_guided()
-                # Reset drone controller completely: clears stale EKF position,
-                # smoother state, and origin so fresh GPS is used as reference.
-                # Without this, the EKF retains a position from before the LOITER
-                # and every new camera projection is rejected as a >10 m jump,
-                # causing the drone to fly in one fixed wrong direction.
+                # Reset EKF and smoother so stale position from before the
+                # LOITER/mode-change does not drive wrong velocity.
+                # Keep the NED origin — resetting it on every follow resume
+                # causes repeated coordinate-frame shifts which make EKF
+                # position and yaw direction unstable.
                 self.drone_ctrl.reset()
-                self.drone_ctrl.clear_origin()
                 print("[Follow] Latch cleared, GUIDED re-entered, EKF reset — resuming")
                 return {"following": True, "status": "ok", "msg": "resumed"}
             return {"following": True, "status": "ok", "msg": "already following"}
