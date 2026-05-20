@@ -506,15 +506,18 @@ class DroneController:
                 )
             return 0.0
 
-        # S1.4 — Vertical clearance guard
+        # S1.4 — Vertical clearance guard (0.5 m hysteresis prevents GPS-noise oscillation)
         alt_agl = self._mav.get_altitude_agl()
         self._last_vertical_clearance_m = alt_agl
         min_vert = max(self._s.min_vertical_sep_m, self._s.follow_altitude_m)
-        if alt_agl < min_vert:
+        # Use a lower trigger threshold so GPS noise (±0.5 m) at target altitude
+        # doesn't flip between climb and follow on every frame.
+        if alt_agl < (min_vert - 0.5):
             if now - getattr(self, '_vclear_warn_t', 0.0) >= 3.0:
                 self._vclear_warn_t = now
                 print(f"[Drone] Altitude {alt_agl:.1f}m below "
-                      f"{min_vert:.0f}m follow minimum — climbing")
+                      f"{min_vert - 0.5:.1f}m follow threshold — climbing "
+                      f"(target {min_vert:.0f}m)")
             self._mav.send_velocity_ned(0.0, 0.0, -self._s.retreat_speed_ms)
             return 0.0
 

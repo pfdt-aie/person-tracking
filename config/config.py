@@ -235,29 +235,29 @@ DRONE_KP: float     = 0.4    # Position error → velocity (m/s per meter of err
 DRONE_KP_YAW: float = 0.6    # Gimbal pan angle → drone yaw rate (rad/s per degree)
 
 # --- Velocity smoothing ---
-VEL_EMA_ALPHA: float  = 0.25    # EMA filter factor (0.1=smooth/laggy, 0.5=responsive)
-MAX_JERK_MS3: float   = 2.0     # Jerk limit (m/s³)
-MAX_ACCEL_MS2: float  = 0.5     # Hard acceleration cap (m/s²) applied after jerk limiter
+VEL_EMA_ALPHA: float  = 0.35    # EMA filter factor — raised for faster response
+MAX_JERK_MS3: float   = 5.0     # Jerk limit (m/s³) — was 2.0, raised for faster ramp
+MAX_ACCEL_MS2: float  = 2.0     # Hard acceleration cap (m/s²) — was 0.5 (took 3 s to reach speed)
 
 # --- MAVLink send rate ---
 DRONE_CMD_RATE_HZ: int   = 10   # Velocity command send rate
 
 # --- Failsafe timings ---
 TRACKING_LOSS_HOVER_S: float  = 2.0    # Seconds before sending zero velocity
-TRACKING_LOSS_LOITER_S: float = 5.0    # Seconds before issuing LOITER command
-TRACKING_LOSS_ALERT_S: float  = 15.0   # Seconds before GCS terminal alert
+TRACKING_LOSS_LOITER_S: float = 10.0   # Seconds before issuing LOITER — was 5s, too short for intermittent YOLO
+TRACKING_LOSS_ALERT_S: float  = 20.0   # Seconds before GCS terminal alert
 
 # --- Detection confirmation before drone body movement ---
 # Gimbal tracks immediately; drone body stays at zero velocity until this many
 # consecutive frames have a valid detection. Prevents false-positive (bush/dog)
 # from yanking the airframe.
-BODY_MOVE_CONFIRM_FRAMES: int = 5
+BODY_MOVE_CONFIRM_FRAMES: int = 3    # was 5 — 3 frames at 10 Hz = 300ms confirmation
 
 # --- Latency floor for drone body control (S3.5) ---
 # When effective detection FPS drops below this, the drone body holds (sends
 # zero velocity) so stale frames cannot drive a position command. Gimbal is
 # unaffected.
-MIN_TRACKING_FPS: float = 8.0
+MIN_TRACKING_FPS: float = 5.0    # was 8.0 — on loaded Jetson (FFmpeg+recording+streaming) YOLO can drop below 8 fps
 # Number of recent detection ticks averaged when estimating FPS.
 FPS_WINDOW_SIZE: int    = 20
 
