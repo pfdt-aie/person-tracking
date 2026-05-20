@@ -241,9 +241,11 @@ class SIYIController:
         Returns True on startup (before first packet) so the watchdog
         does not fire before the connection has had a chance to establish.
         """
-        if self._last_recv_time == 0.0:
+        with self.lock:
+            last = self._last_recv_time
+        if last == 0.0:
             return True
-        return (time.monotonic() - self._last_recv_time) < cfg.GIMBAL_WATCHDOG_S
+        return (time.monotonic() - last) < cfg.GIMBAL_WATCHDOG_S
 
     # ------------------------------------------------------------------
     #  CRC and packet building
@@ -253,8 +255,7 @@ class SIYIController:
         """CRC-16/XMODEM — matches SIYI SDK specification.
 
         Parameters: poly=0x1021, init=0x0000, refIn=False, refOut=False, xorOut=0x0000
-        Verified test vector: _crc16(b'\\x55\\x66\\x01\\x00\\x00\\x00\\x00\\x08\\x01') == 0xD44C
-        (center-gimbal command with seq=0)
+        Verified test vector: _crc16(b'123456789') == 0x31C3
         """
         crc = 0
         for b in data:
