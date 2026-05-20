@@ -489,16 +489,19 @@ class PersonGimbalTracker:
         # clear the latch so the drone controller can send commands again.
         # Web UI polling that hits this path when not latched is harmless.
         if self._ts.drone_following:
-            # If the RC-override latch is active (our LOITER command or pilot
-            # mode switch set it), operator re-typing 'follow' is an explicit
-            # intent to resume — clear the latch AND switch back to GUIDED so
-            # the drone controller is unblocked with a single command.
             if self.mav.is_rc_override_active() or self.mav.get_mode() != "GUIDED":
                 self.mav.clear_rc_override()
                 if self.mav.get_mode() != "GUIDED":
                     print(f"[Follow] FCU in {self.mav.get_mode()} — switching to GUIDED")
                     self.mav.set_mode_guided()
-                print("[Follow] Latch cleared and GUIDED re-entered — body following resumed")
+                # Reset drone controller completely: clears stale EKF position,
+                # smoother state, and origin so fresh GPS is used as reference.
+                # Without this, the EKF retains a position from before the LOITER
+                # and every new camera projection is rejected as a >10 m jump,
+                # causing the drone to fly in one fixed wrong direction.
+                self.drone_ctrl.reset()
+                self.drone_ctrl.clear_origin()
+                print("[Follow] Latch cleared, GUIDED re-entered, EKF reset — resuming")
                 return {"following": True, "status": "ok", "msg": "resumed"}
             return {"following": True, "status": "ok", "msg": "already following"}
 

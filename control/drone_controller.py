@@ -556,15 +556,31 @@ class DroneController:
         # --- Drone yaw correction for gimbal pan ---
         pan_correction_rads = self._compute_yaw_correction(gimbal_pan_deg, dt)
 
-        # Confirmation log every 3 s so operator knows commands are flowing
+        # Cap smoother internal state to MAX_TRACKING_SPEED_MS so it cannot
+        # wind up to huge values when the EKF has a wrong position estimate.
+        # Without this cap, _prev_vn grows at 2 m/s²/tick and the drone would
+        # take minutes to decelerate after EKF is corrected.
+        max_v = self._s.max_tracking_speed_ms
+        horiz = math.hypot(vN, vE)
+        if horiz > max_v:
+            scale = max_v / horiz
+            vN *= scale
+            vE *= scale
+            # Also clamp internal smoother state so the jerk limiter doesn't
+            # need to wind down from an enormous value.
+            self._prev_vn = max(-max_v, min(max_v, self._prev_vn))
+            self._prev_ve = max(-max_v, min(max_v, self._prev_ve))
+            self._ema_vn  = max(-max_v, min(max_v, self._ema_vn))
+            self._ema_ve  = max(-max_v, min(max_v, self._ema_ve))
+
+        # Confirmation log every 3 s — shows the ACTUAL sent velocity (post-cap).
         if now - getattr(self, '_follow_log_t', 0.0) >= 3.0:
             self._follow_log_t = now
             print(f"[Drone] Following ✓  vel=({vN:.2f},{vE:.2f}) m/s  "
                   f"person={sep:.1f}m  to_target={target_dist:.1f}m  "
                   f"alt={alt_agl:.1f}m")
 
-        # Send VELOCITY ONLY — position target is frame-dependent and wrong;
-        # velocity computed from GPS is always in the correct direction.
+        # Send VELOCITY ONLY — velocity from GPS is always correct direction.
         self._mav.send_velocity_ned(vN, vE, 0.0)
         return pan_correction_rads
 
@@ -868,26 +884,28 @@ class DroneController:
             self._mav.send_zero_velocity()
             return 0.0
 
+        # Phase 2: Person lost too long — hold zero velocity (hover).
+        # We deliberately do NOT send LOITER here. send_loiter() changes the
+        # FCU flight mode (GUIDED→LOITER) which:
+        #   a) triggers the RC-override latch every time, requiring operator
+        #      to type 'follow' again to recover;
+        #   b) causes the EKF to retain its stale position, so when follow
+        #      resumes the drone flies in the wrong direction (see bug in log
+        #      10-48-21 where drone flew NE at 1.5 m/s for 3 minutes).
+        # Staying in GUIDED with zero velocity achieves the same hover safely.
+        self._mav.send_zero_velocity()
         if not self._loiter_issued:
-            # Phase 2: Issue LOITER and alert operator
-            self._mav.send_loiter()
             self._loiter_issued = True
-            self._loiter_t      = now
             print(
-                f"[Drone] Tracking lost {dt_lost:.1f}s — LOITER issued. "
-                f"Drone holding position."
+                f"[Drone] Tracking lost {dt_lost:.1f}s — hovering in GUIDED. "
+                f"Gimbal searching. Type 'follow' to reset EKF if person moved."
             )
-        elif (now - self._loiter_t >= self._s.loiter_confirm_timeout_s
-              and self._mav.get_mode() not in ("LOITER", "BRAKE")):
-            self._mav.send_loiter()
-            self._loiter_t = now   # one retry; timer resets so it won't fire again
-            print("[Drone] LOITER retry (mode not confirmed)")
 
         if dt_lost >= self._s.tracking_loss_alert_s and not self._alert_issued:
             self._alert_issued = True
             print(
                 f"[Drone] ⚠ ALERT: Person not detected for {dt_lost:.0f}s. "
-                f"Drone in LOITER. Operator action required."
+                f"Drone hovering. Walk back in front of camera or type 'follow'."
             )
 
         return 0.0   # failsafe active
@@ -1059,6 +1077,15 @@ class DroneController:
         # This prevents the operator bypassing the 10-min cap via unfollow+follow.
         self._rc_loss_loiter_issued = False
         self._ekf.reset()
+
+    def clear_origin(self) -> None:
+        """Force NED origin to be re-established from current GPS on next tick.
+
+        Call this after a LOITER/mode-change recovery so the EKF's position
+        reference reflects the drone's current location, not where it was when
+        follow was first enabled.
+        """
+        self._origin_set = False
 
     def on_target_reacquired(self) -> None:
         """Lightweight visual-reacquisition hook.
