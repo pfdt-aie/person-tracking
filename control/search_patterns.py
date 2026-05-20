@@ -397,9 +397,12 @@ class LissajousSearch:
         w_y   = 2.0 * math.pi / cfg.LISSAJOUS_YAW_PERIOD
         w_p   = 2.0 * math.pi / cfg.LISSAJOUS_PITCH_PERIOD
         yaw   = int(cfg.LISSAJOUS_YAW_SPEED  * math.cos(w_y * t))
-        # Pitch: use (1 - cos) / 2 so it oscillates between 0 (neutral) and
-        # -PITCH_SPEED (full down) — never tilts up toward sky.
-        pitch = -int(cfg.LISSAJOUS_PITCH_SPEED * (1.0 - math.cos(w_p * t)) / 2.0)
+        # Pitch: bidirectional cos() so the gimbal oscillates between the shallow
+        # and steep search bounds. The ground constraint (never above horizontal)
+        # is enforced by _clamp_search_pitch_for_tilt in the GSM, not by clamping
+        # the speed sign here. The previous (1-cos)/2 formula only commanded
+        # downward, causing the gimbal to drift to -80° and stay — 1D scan only.
+        pitch = int(cfg.LISSAJOUS_PITCH_SPEED * math.cos(w_p * t))
         return yaw, pitch
 
     @property
