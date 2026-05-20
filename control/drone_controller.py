@@ -501,7 +501,6 @@ class DroneController:
         dn = (person_lat - drone_lat) * _R * (math.pi / 180.0)
         de = (person_lon - drone_lon) * _R * (math.pi / 180.0) * _cos_lat
         sep = math.hypot(dn, de)
-        self._last_person_sep_m = sep
 
         # S1.4 — Separation guard: use 3D distance so drone hovering above
         # the person at 7m altitude (safe in 3D) does not trigger a retreat.
@@ -515,12 +514,9 @@ class DroneController:
                 self._retreat_warn_t = now
                 print(f"[Drone] 3D sep {sep_3d:.1f}m (horiz={sep:.1f}m alt={alt_agl:.1f}m) "
                       f"< min {self._s.min_person_drone_sep_m:.0f}m — retreating")
-            if sep > 0.01:
-                self._mav.send_velocity_ned(
-                    -dn / sep * self._s.retreat_speed_ms,
-                    -de / sep * self._s.retreat_speed_ms,
-                    0.0,
-                )
+            # Use _send_retreat_velocity: handles degenerate sep=0 case by climbing.
+            # Inline dn/de as relative coords (person at dn/de, drone at origin).
+            self._send_retreat_velocity(pN=dn, pE=de, drone_pN=0.0, drone_pE=0.0, sep=sep)
             return 0.0
 
         # S1.4 — Vertical clearance guard (0.5 m hysteresis prevents GPS-noise oscillation)
@@ -772,7 +768,7 @@ class DroneController:
         return self._bearing_rad
 
     def _should_retreat(self, sep: float) -> bool:
-        """Latch retreat with hysteresis on horizontal separation."""
+        """Latch retreat with hysteresis on 3D separation (caller computes)."""
         if sep < self._s.min_person_drone_sep_m:
             self._retreating = True
         elif sep > self._s.min_person_drone_sep_m + self._s.retreat_hysteresis_m:

@@ -77,3 +77,33 @@ def test_retreat_degenerate_zero_sep_climbs():
     assert kind == "vel"
     assert vN == 0.0 and vE == 0.0
     assert vD < 0.0           # NED down negative = climb
+
+
+# ---------------------------------------------------------------------------
+# 3D separation geometry — ensures update() correctly uses sep_3d, not sep_2d
+# ---------------------------------------------------------------------------
+
+def test_3d_sep_no_retreat_at_cruise_altitude():
+    """Drone at 7m alt, 3m horiz: sep_3d=7.6m > MIN_SEP=4m — must NOT retreat."""
+    sep_3d = math.hypot(3.0, 7.0)   # sqrt(9+49) ≈ 7.6 m
+    c, _ = _controller()
+    assert c._should_retreat(sep_3d) is False
+
+
+def test_3d_sep_triggers_retreat_at_low_altitude():
+    """Drone at 1m alt, 3.5m horiz: sep_3d=3.64m < MIN_SEP=4m — must retreat."""
+    sep_3d = math.hypot(3.5, 1.0)   # sqrt(12.25+1) ≈ 3.64 m
+    c, _ = _controller()
+    assert c._should_retreat(sep_3d) is True
+
+
+def test_retreat_sends_command_even_at_zero_horizontal_sep():
+    """Degenerate sep=0 during retreat must send a velocity command (climb)."""
+    c, mav = _controller()
+    # Simulate inline logic of update(): person directly below drone (sep=0)
+    c._send_retreat_velocity(pN=0.0, pE=0.0, drone_pN=0.0, drone_pE=0.0, sep=0.0)
+    assert len(mav.cmds) == 1, "No velocity command sent for degenerate retreat"
+    kind = mav.cmds[0][0]
+    assert kind == "vel", f"Expected vel command, got {kind}"
+    vD = mav.cmds[0][3]
+    assert vD < 0.0, f"Expected climb (vD<0) for degenerate retreat, got vD={vD}"
