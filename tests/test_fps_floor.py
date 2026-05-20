@@ -48,9 +48,9 @@ def test_fps_estimated_from_window():
 def test_low_fps_window():
     c = _controller()
     base = time.monotonic()
-    # 5 Hz — far below MIN_TRACKING_FPS=8
+    # 4 Hz — below MIN_TRACKING_FPS=5.0
     for i in range(10):
-        c._fps_times.append(base + i / 5.0)
+        c._fps_times.append(base + i / 4.0)
     assert c.effective_fps() < cfg.MIN_TRACKING_FPS
 
 

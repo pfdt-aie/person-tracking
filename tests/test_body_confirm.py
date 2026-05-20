@@ -60,6 +60,47 @@ def test_false_detection_does_not_break_confirm():
     assert c.is_body_confirmed() is True
 
 
+# ---------------------------------------------------------------------------
+# _prediction_window_active — EKF prediction phase bypasses body confirm
+# ---------------------------------------------------------------------------
+
+class _FakeEKF:
+    def __init__(self, valid: bool) -> None:
+        self.is_valid = valid
+
+
+def _controller_with_ekf(valid: bool) -> "DroneController":
+    c = _controller()
+    c._ekf = _FakeEKF(valid=valid)
+    return c
+
+
+def test_prediction_window_active_when_ekf_valid_and_within_hover():
+    """EKF valid, loss within hover window → prediction active → body confirm exempt."""
+    c = _controller_with_ekf(valid=True)
+    dt_lost = c._s.tracking_loss_hover_s * 0.4   # 40 % — well within 2 s
+    assert c._prediction_window_active(dt_lost) is True
+
+
+def test_prediction_window_inactive_when_ekf_invalid():
+    """EKF not yet initialised → startup phase → body confirm still required."""
+    c = _controller_with_ekf(valid=False)
+    assert c._prediction_window_active(0.5) is False
+
+
+def test_prediction_window_inactive_when_hover_expired():
+    """dt_lost >= tracking_loss_hover_s → prediction phase over → body confirm applies."""
+    c = _controller_with_ekf(valid=True)
+    dt_lost = c._s.tracking_loss_hover_s + 0.1   # just past 2 s
+    assert c._prediction_window_active(dt_lost) is False
+
+
+def test_prediction_window_boundary_exclusive():
+    """Exactly at hover boundary → not active (tracking_loss_hover_s is exclusive)."""
+    c = _controller_with_ekf(valid=True)
+    assert c._prediction_window_active(c._s.tracking_loss_hover_s) is False
+
+
 def test_visual_reacquire_does_not_full_reset_follow_state():
     class _Mav:
         def get_velocity_ned(self):

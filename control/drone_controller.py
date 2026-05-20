@@ -180,6 +180,18 @@ class DroneController:
             age = time.monotonic() - self._last_detection
         return age < self._s.body_confirm_window_s
 
+    def _prediction_window_active(self, dt_lost: float) -> bool:
+        """True during the EKF prediction phase — body confirm gate is exempt.
+
+        When the EKF already has a valid state and the tracking loss is within
+        tracking_loss_hover_s (2 s), the drone uses EKF-predicted position
+        intentionally.  Applying the body confirm gate (0.8 s) would cut this
+        prediction window short, causing an unnecessary 1.2 s stop mid-follow.
+        tracking_loss() already verified this window is safe; skip body confirm.
+        Only startup (EKF not yet initialized) still requires body confirmation.
+        """
+        return self._ekf.is_valid and dt_lost < self._s.tracking_loss_hover_s
+
     def effective_fps(self) -> float:
         """Rolling estimate of detection-loop FPS (S3.5).
 
@@ -439,14 +451,16 @@ class DroneController:
             self._fps_warned = False
 
         # --- S1.5: Body-movement confirmation gate ---
-        if not self.is_body_confirmed():
-            with self._lock:
-                age = time.monotonic() - self._last_detection
+        # Bypassed during EKF prediction (EKF valid, dt_lost < tracking_loss_hover_s):
+        # tracking_loss() returned None above, indicating the 2s prediction window
+        # is active. Requiring body confirm here would cut that window to 0.8s,
+        # stopping the drone mid-follow during brief occlusions.
+        if not self._prediction_window_active(dt_lost) and not self.is_body_confirmed():
             if now - getattr(self, '_confirm_warn_t', 0.0) >= 2.0:
                 self._confirm_warn_t = now
                 from utils import terminal as _t
                 _t.log_only(f"[Drone] Body confirm waiting: last detection "
-                            f"{age:.1f}s ago (window {self._s.body_confirm_window_s:.1f}s)")
+                            f"{dt_lost:.1f}s ago (window {self._s.body_confirm_window_s:.1f}s)")
             self._mav.send_zero_velocity()
             return 0.0
 
@@ -663,7 +677,8 @@ class DroneController:
             self._fps_warned = False
 
         # Body-movement confirmation: same as real flight.
-        if not self.is_body_confirmed():
+        # Prediction-window bypass applies here too (see _prediction_window_active).
+        if not self._prediction_window_active(dt_lost) and not self.is_body_confirmed():
             self._mav.send_zero_velocity()
             return 0.0
 
