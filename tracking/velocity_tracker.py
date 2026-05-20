@@ -157,14 +157,12 @@ class VelocityTracker:
 
     def predict_command(
         self,
-        dt_since_loss: float,
         adaptive_kp: float,
         adaptive_speed: float,
     ) -> tuple[int, int]:
         """Return (yaw_cmd, pitch_cmd) based on last known velocity.
 
         Args:
-            dt_since_loss:  Seconds since the person was last seen.
             adaptive_kp:    Current proportional gain (from _adapt_speed).
             adaptive_speed: Current speed limit.
 
@@ -214,4 +212,5 @@ class VelocityTracker:
         self.direction_deg   = 0.0
         self.edge_exit       = None
         self.edge_boost_yaw  = self.edge_boost_pitch = 0.0
+        self.last_cx = self.last_cy = 0.0
         self.valid           = False

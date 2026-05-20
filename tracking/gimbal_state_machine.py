@@ -177,8 +177,7 @@ class GimbalStateMachine:
 
     def _handle_predicting(self) -> None:
         st = self._state
-        dt = time.time() - self._target_lost_time  # type: ignore[operator]
-        yaw, pitch = self._velocity.predict_command(dt, st.telem_adaptive_kp, st.telem_adaptive_speed)
+        yaw, pitch = self._velocity.predict_command(st.telem_adaptive_kp, st.telem_adaptive_speed)
         self._ctrl.set_speed(yaw, pitch)
         st.telem_yaw_cmd, st.telem_pitch_cmd = yaw, pitch
 
@@ -188,7 +187,7 @@ class GimbalStateMachine:
         dt_fade  = dt_total - cfg.PREDICT_DURATION
         fade     = 1.0 - (1.0 - cfg.PRED_FADE_MIN_FACTOR) * (dt_fade / cfg.PRED_FADE_DURATION)
         fade     = max(cfg.PRED_FADE_MIN_FACTOR, min(1.0, fade))
-        yaw, pitch = self._velocity.predict_command(dt_total, st.telem_adaptive_kp, st.telem_adaptive_speed)
+        yaw, pitch = self._velocity.predict_command(st.telem_adaptive_kp, st.telem_adaptive_speed)
         yaw, pitch = int(yaw * fade), int(pitch * fade)
         self._ctrl.set_speed(yaw, pitch)
         st.telem_yaw_cmd, st.telem_pitch_cmd = yaw, pitch
