@@ -546,11 +546,20 @@ class DroneController:
             raw_ve = self._s.drone_kp * target_de + vE_p
             vN, vE = self._apply_smoother(raw_vn, raw_ve, dt)
 
+        # Standoff target position — reused by geofence and HOME keep-out checks.
+        tkN = pN_p - math.cos(bearing) * self._s.follow_standoff_m
+        tkE = pE_p - math.sin(bearing) * self._s.follow_standoff_m
+
+        # S2.1 — Geofence: block commands that would drive the standoff target
+        # outside the configured boundary.  _target_within_geofence returns True
+        # when the target position is legal; False blocks the velocity command.
+        if not self._target_within_geofence(tkN, tkE, alt_agl):
+            self._mav.send_zero_velocity()
+            return 0.0
+
         # S2.2 — HOME keep-out: only meaningful when actual HOME_POSITION
         # was received (not GPS fallback where origin = drone hover spot).
         if self._mav.is_home_set():
-            tkN = pN_p - math.cos(bearing) * self._s.follow_standoff_m
-            tkE = pE_p - math.sin(bearing) * self._s.follow_standoff_m
             if not self._safety.check_home_keepout(tkN, tkE):
                 self._mav.send_zero_velocity()
                 return 0.0

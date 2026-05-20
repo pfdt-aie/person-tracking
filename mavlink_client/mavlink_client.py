@@ -531,18 +531,29 @@ class MAVLinkClient:
                   "confidence=override")
             return
 
-        v_mv    = self._vbat_mv
-        nominal = self._s.cell_nominal_mv  # e.g. 3700 mV
-        ratio   = v_mv / nominal
-        estimated = round(ratio)
-        # Distance from nearest integer (0.0 = perfect, 0.5 = ambiguous).
-        delta = abs(ratio - estimated)
-        if delta < 0.1:
-            confidence = "high"
-        elif delta < 0.2:
-            confidence = "medium"
-        else:
-            confidence = "low"
+        v_mv = self._vbat_mv
+        # Try nominal (3700 mV) first, then full-charge (4200 mV) as fallback.
+        # This handles the common case where the battery is fresh off the charger
+        # (4.2 V/cell), causing the nominal reference to produce a non-integer
+        # ratio that falls outside the 10 % confidence band.
+        _CELL_FULL_MV = 4200  # max LiPo cell voltage
+        _CELL_MAX_MV  = 4250  # reject per-cell estimates above this (impossible)
+
+        estimated  = round(v_mv / self._s.cell_nominal_mv)
+        confidence = "low"
+        for ref_mv in (self._s.cell_nominal_mv, _CELL_FULL_MV):
+            ratio = v_mv / ref_mv
+            est   = round(ratio)
+            if not (3 <= est <= 6):
+                continue
+            if v_mv / est > _CELL_MAX_MV:
+                continue
+            delta = abs(ratio - est)
+            if delta < 0.1:
+                estimated, confidence = est, "high"
+                break
+            if delta < 0.2 and confidence != "high":
+                estimated, confidence = est, "medium"
 
         if 3 <= estimated <= 6 and confidence != "low":
             self._cell_count     = estimated
