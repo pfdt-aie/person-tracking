@@ -20,7 +20,6 @@ def _controller() -> DroneController:
     c._last_detection = 0.0
     c._loiter_issued = False
     c._alert_issued  = False
-    c._confirm_count = 0
     c._fps_warned    = False
     return c
 

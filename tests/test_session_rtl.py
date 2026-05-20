@@ -101,7 +101,7 @@ def _controller(mav, safety):
     c._gimbal_pan_rad = 0.0
     c._gimbal_tilt_rad = -math.pi / 4
     c._lock = threading.Lock()
-    c._confirm_count = 0
+    c._last_detection = 0.0   # not confirmed (age = huge)
     c._retreating = False
     c._vel_above_t = -1.0
     c._bearing_rad = 0.0

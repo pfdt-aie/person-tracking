@@ -1083,9 +1083,12 @@ class DroneController:
         self._loiter_issued   = False
         self._alert_issued    = False
         self._retreating      = False
-        # Reset last_detection so body confirm requires a fresh detection
-        # after reset (don't inherit stale timestamp from before the reset).
-        self._last_detection  = 0.0
+        # Seed _last_detection to NOW so the tracking-loss timer starts
+        # fresh (dt_lost=0) and does not immediately fire the 20s alert.
+        # Body confirm (age<0.8s) is also True, which is fine — the EKF
+        # is_valid=False gate will block velocity until the first detection
+        # seeds the EKF anyway.
+        self._last_detection  = time.monotonic()
         self._last_person_sep_m = None
         self._last_vertical_clearance_m = None
         self._vel_above_t   = -1.0
