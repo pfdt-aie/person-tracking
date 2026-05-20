@@ -4,10 +4,6 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-import pytest
-
-pytest.importorskip("pymavlink")
-
 from mavlink_client.mavlink_client import MAVLinkClient
 from safety.safety import SafetyMonitor
 from config.settings import load_settings
@@ -25,38 +21,31 @@ def test_latch_starts_clear():
 
 
 def test_latch_does_not_trip_on_first_heartbeat():
-    """First mode observation should not falsely trip the latch."""
+    """UNKNOWN→GUIDED transition must not trip the latch.
+
+    _handle_mode_transition is called with prev_mode='UNKNOWN'. The guard
+    condition (prev_mode == 'GUIDED') is False, so the latch stays clear.
+    """
     c = _client()
-    c._mode = "UNKNOWN"   # initial value
-    # Simulate _rx_loop transition: UNKNOWN → GUIDED
-    new_mode = "GUIDED"
-    if new_mode != c._mode and c._mode not in ("UNKNOWN", ""):
-        if c._mode == "GUIDED" and new_mode != "GUIDED":
-            c._rc_override_latched = True
-    c._mode = new_mode
+    c._handle_mode_transition("UNKNOWN", "GUIDED")
     assert c.is_rc_override_active() is False
 
 
 def test_latch_trips_on_guided_to_other():
     c = _client()
-    c._mode = "GUIDED"
-    new_mode = "LOITER"
-    if c._mode == "GUIDED" and new_mode != "GUIDED":
-        c._rc_override_latched = True
-    c._mode = new_mode
+    c._handle_mode_transition("GUIDED", "LOITER")
     assert c.is_rc_override_active() is True
 
 
 def test_latch_persists_when_guided_returns():
+    """Once latched, returning to GUIDED must NOT auto-clear the latch.
+
+    The operator must explicitly re-enable follow to clear it (S3.6).
+    LOITER→GUIDED does not satisfy prev_mode=='GUIDED', so latch stays.
+    """
     c = _client()
-    c._mode = "GUIDED"
-    c._rc_override_latched = True
-    # Mode comes back to GUIDED — latch must stay
-    c._mode = "LOITER"
-    new_mode = "GUIDED"
-    if c._mode == "GUIDED" and new_mode != "GUIDED":
-        c._rc_override_latched = True
-    c._mode = new_mode
+    c._handle_mode_transition("GUIDED", "LOITER")   # trips latch
+    c._handle_mode_transition("LOITER", "GUIDED")   # back to GUIDED — latch must stay
     assert c.is_rc_override_active() is True
 
 

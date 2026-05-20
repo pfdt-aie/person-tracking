@@ -54,6 +54,13 @@ _MASK_VEL_ONLY  = 3527   # 0b0000_1101_1100_0111 — use velocity only
 # GPS is checked independently via is_gps_ok() / GPS_RAW_INT.fix_type
 _CRITICAL_SENSORS: int = 0x01 | 0x02 | 0x04 | 0x08   # = 0x0F
 
+# MAVLink command IDs and mode flag — defined as plain integers so _set_mode()
+# and send_takeoff() work in unit tests where pymavlink is not installed.
+# Values match the ArduPilot / MAVLink common.xml spec; do not change.
+_MAV_CMD_DO_SET_MODE:              int = 176
+_MAV_CMD_NAV_TAKEOFF:              int = 22
+_MAV_MODE_FLAG_CUSTOM_MODE_ENABLED: int = 1
+
 
 class MAVLinkClient:
     """Thread-safe ArduPilot MAVLink connection manager.
@@ -986,8 +993,8 @@ class MAVLinkClient:
             proceed.
         """
         ok = self.send_command_with_ack(
-            mavutil.mavlink.MAV_CMD_DO_SET_MODE,
-            p1=mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+            _MAV_CMD_DO_SET_MODE,
+            p1=_MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
             p2=self._MODE_NUMBERS[label],
         )
         if ok:
@@ -1027,7 +1034,7 @@ class MAVLinkClient:
         and this returns True so callers proceed identically.
         """
         ok = self.send_command_with_ack(
-            mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+            _MAV_CMD_NAV_TAKEOFF,
             p7=float(altitude_m),
         )
         if ok:

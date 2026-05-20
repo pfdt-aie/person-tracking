@@ -9,9 +9,6 @@ log stays usable.
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-import pytest
-pytest.importorskip("pymavlink")
-
 from mavlink_client.mavlink_client import MAVLinkClient
 from safety.safety import SafetyMonitor
 
