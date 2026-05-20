@@ -47,7 +47,10 @@ class _Tee:
         return self._stream.fileno()
 
     def isatty(self) -> bool:
-        return False   # prevents libraries from adding ANSI colour to the log
+        # Reflect the actual terminal so terminal.status() can overwrite the
+        # same line in-place when running interactively.  The log file always
+        # receives every line regardless (write() never skips).
+        return self._stream.isatty()
 
 
 def setup_log(log_dir: str) -> tuple:
@@ -69,6 +72,10 @@ def setup_log(log_dir: str) -> tuple:
     orig_err   = sys.stderr
     sys.stdout = _Tee(orig_out, log_file, tee_lock)
     sys.stderr = _Tee(orig_err, log_file, tee_lock)
+    # Give terminal.log_only() a direct handle to the log file so it can
+    # write debug lines that go to the file but NOT to the terminal.
+    from utils import terminal as _t
+    _t.set_log_file(log_file)
     return log_path, orig_out, orig_err, log_file
 
 

@@ -447,15 +447,21 @@ class DroneController:
         if not self.is_body_confirmed():
             if now - getattr(self, '_confirm_warn_t', 0.0) >= 2.0:
                 self._confirm_warn_t = now
-                print(f"[Drone] Body confirm: {self._confirm_count}/"
-                      f"{self._s.body_move_confirm_frames} consecutive detections "
-                      f"— holding until confirmed")
+                get_flight_log().event(
+                    "body_confirm_wait",
+                    count=self._confirm_count,
+                    needed=self._s.body_move_confirm_frames,
+                )
+                from utils import terminal as _t
+                _t.log_only(f"[Drone] Body confirm: {self._confirm_count}/"
+                            f"{self._s.body_move_confirm_frames} consecutive detections "
+                            f"— holding until confirmed")
             self._mav.send_zero_velocity()
             return 0.0
 
         # --- EKF validity ---
         if not self._ekf.is_valid or not self._origin_set:
-            if now - getattr(self, '_ekf_warn_t', 0.0) >= 2.0:
+            if now - getattr(self, '_ekf_warn_t', 0.0) >= 5.0:
                 self._ekf_warn_t = now
                 print("[Drone] EKF not yet initialised — waiting for first "
                       "valid camera projection (needs alt > 0.5m and gimbal down)")

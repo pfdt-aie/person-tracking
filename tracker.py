@@ -921,9 +921,9 @@ class PersonGimbalTracker:
                                     if ts.lock_id is not None else "")
                         terminal.status(f"[IDs] {id_str}{lock_str}  | 'track <id>' to lock")
                     elif not id_snap and self._last_id_signature:
-                        # IDs went from "something" to nothing — note it once.
-                        self._last_id_signature = ()  # falsy → won't re-trigger until next detection
-                        terminal.event("[IDs] (none detected)")
+                        # IDs went from "something" to nothing — update in place.
+                        self._last_id_signature = ()
+                        terminal.status("[IDs] (none detected)")
 
                 # --- Gimbal state machine (inner loop ~30 Hz) ---
                 if ts.mode == "AUTO":

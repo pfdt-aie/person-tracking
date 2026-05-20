@@ -283,9 +283,10 @@ class PersonEKF:
         dy = meas_e - float(self._x[1])
         jump = math.hypot(dx, dy)
         if jump > cfg.EKF_MAX_JUMP_M:
-            print(f"[EKF] Position jump rejected: {jump:.1f}m "
-                  f"(limit {cfg.EKF_MAX_JUMP_M:.1f}m) "
-                  f"— possible re-ID swap or projection glitch")
+            from utils import terminal as _t
+            _t.log_only(f"[EKF] Position jump rejected: {jump:.1f}m "
+                        f"(limit {cfg.EKF_MAX_JUMP_M:.1f}m) "
+                        f"— possible re-ID swap or projection glitch")
             return False
 
         # Innovation
@@ -298,8 +299,9 @@ class PersonEKF:
             mah_sq  = float(innov @ S_inv @ innov)
             gate_sq = cfg.EKF_GATE_SIGMA ** 2
             if mah_sq > gate_sq:
-                print(f"[EKF] Mahalanobis gate rejected: mah²={mah_sq:.1f} > {gate_sq:.1f} "
-                      f"— noisy projection or GPS error")
+                from utils import terminal as _t
+                _t.log_only(f"[EKF] Mahalanobis gate rejected: mah²={mah_sq:.1f} > {gate_sq:.1f} "
+                            f"— noisy projection or GPS error")
                 return False
         except np.linalg.LinAlgError:
             return False

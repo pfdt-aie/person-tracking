@@ -17,9 +17,37 @@ from __future__ import annotations
 import sys
 import threading
 
-_lock   = threading.Lock()
-_active = False   # True while a status line is live (cursor not yet at \n)
-_tty    = sys.stdout.isatty()
+_lock    = threading.Lock()
+_active  = False   # True while a status line is live (cursor not yet at \n)
+_log_fh  = None    # set by logger.set_log_file() after setup_log runs
+
+
+def _is_tty() -> bool:
+    return sys.stdout.isatty()
+
+
+def set_log_file(fh) -> None:
+    """Called by logger.setup_log() so log_only() knows where to write."""
+    global _log_fh
+    _log_fh = fh
+
+
+def log_only(msg: str) -> None:
+    """Write *msg* to the log file but NOT to the terminal.
+
+    Use for high-frequency debug lines (EKF rejections, DRY-RUN packets,
+    body-confirm counts) that would flood the operator's terminal but are
+    still valuable for post-flight analysis.
+    Falls back to a no-op if the log file is not yet set.
+    """
+    global _log_fh
+    if _log_fh is not None:
+        try:
+            with _lock:
+                _log_fh.write(msg + "\n")
+                _log_fh.flush()
+        except Exception:
+            pass
 
 
 def status(msg: str) -> None:
@@ -30,7 +58,7 @@ def status(msg: str) -> None:
     is printed normally so log files stay readable.
     """
     global _active
-    if not _tty:
+    if not _is_tty():
         print(msg)
         return
     with _lock:
@@ -40,14 +68,9 @@ def status(msg: str) -> None:
 
 
 def event(msg: str) -> None:
-    """Print a permanent log line, moving past any live status line first.
-
-    If a status() line is currently on screen this inserts a newline before
-    printing so the event appears on its own line and the status line is
-    preserved above it.
-    """
+    """Print a permanent log line, moving past any live status line first."""
     global _active
-    if not _tty:
+    if not _is_tty():
         print(msg)
         return
     with _lock:
@@ -60,7 +83,7 @@ def event(msg: str) -> None:
 def clear() -> None:
     """Clear the current status line (if any) and leave cursor at column 0."""
     global _active
-    if not _tty:
+    if not _is_tty():
         return
     with _lock:
         if _active:

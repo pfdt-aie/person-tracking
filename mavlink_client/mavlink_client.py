@@ -1243,4 +1243,6 @@ class MAVLinkClient:
         if now - self._ground_test_banner_t >= 5.0:
             print("[MAVLink] ⚠ GROUND-TEST — TX suppressed (no commands sent to FCU)")
             self._ground_test_banner_t = now
-        print(f"[MAVLink] [DRY-RUN] {body}")
+        # Individual packet lines are log-only — operator already sees the banner.
+        from utils import terminal as _t
+        _t.log_only(f"[MAVLink] [DRY-RUN] {body}")
