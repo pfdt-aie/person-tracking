@@ -573,15 +573,24 @@ class DroneController:
             self._ema_vn  = max(-max_v, min(max_v, self._ema_vn))
             self._ema_ve  = max(-max_v, min(max_v, self._ema_ve))
 
+        # Drone heading: face the person.  Without this the drone flies
+        # sideways relative to its heading, forcing the gimbal to pan large
+        # amounts continuously and hitting its ±160° limit.  With it the
+        # gimbal stays nearly centred and the flight looks natural.
+        target_yaw = math.atan2(de, dn) if sep > 1.0 else None
+
         # Confirmation log every 3 s — shows the ACTUAL sent velocity (post-cap).
         if now - getattr(self, '_follow_log_t', 0.0) >= 3.0:
             self._follow_log_t = now
-            print(f"[Drone] Following ✓  vel=({vN:.2f},{vE:.2f}) m/s  "
+            yaw_str = (f"yaw={math.degrees(target_yaw):.0f}°"
+                       if target_yaw is not None else "yaw=hold")
+            print(f"[Drone] Following ✓  vel=({vN:.2f},{vE:.2f}) m/s  {yaw_str}  "
                   f"person={sep:.1f}m  to_target={target_dist:.1f}m  "
                   f"alt={alt_agl:.1f}m")
 
-        # Send VELOCITY ONLY — velocity from GPS is always correct direction.
-        self._mav.send_velocity_ned(vN, vE, 0.0)
+        # Send VELOCITY + YAW — velocity from GPS is always correct direction,
+        # yaw target keeps the drone facing the person.
+        self._mav.send_velocity_ned(vN, vE, 0.0, yaw_rad=target_yaw)
         return pan_correction_rads
 
     # ------------------------------------------------------------------
@@ -829,6 +838,16 @@ class DroneController:
             # frame size is stored separately; use a reasonable default
             frame_w = getattr(self, "_frame_w", 1280)
             frame_h = getattr(self, "_frame_h", 720)
+
+            # Skip EKF update if bbox bottom (feet) is touching the frame edge —
+            # the projection assumes y2 = feet on ground, but if the person's
+            # feet are below the frame the projection puts them closer than
+            # they actually are, causing the drone to over-pursue.
+            if y2 >= frame_h - 5:
+                return
+            # Also skip if any edge is clipped (person partly out of frame)
+            if x1 <= 2 or x2 >= frame_w - 2 or y1 <= 2:
+                return
 
             result = self._geo.project(
                 x1, y1, x2, y2, frame_w, frame_h,

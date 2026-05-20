@@ -14,7 +14,7 @@ GIMBAL_PORT: int = 37260
 RTSP_URL: str    = "rtsp://192.168.144.25:8554/main.264"
 
 MODEL_PATH: str       = "models/yolo26s.engine"
-CONF_THRESHOLD: float = 0.35
+CONF_THRESHOLD: float = 0.30   # was 0.35 — alternating detection pattern in logs suggests too high
 IMGSZ: int            = 640
 DETECT_DEVICE: str    = "auto"   # "auto" | "cpu" | "cuda:0" | "0"
 
@@ -208,7 +208,7 @@ MIN_VERTICAL_SEP_M: float     = 3.0    # Soft vertical clearance above person (m
 RETREAT_SPEED_MS: float       = 1.0    # Speed used when actively backing away from subject
 RETREAT_HYSTERESIS_M: float   = 1.5    # Re-engage follow only when sep > MIN_SEP + this (m)
 STANDOFF_VEL_THRESHOLD_MS: float = 0.3 # Use person velocity direction above this speed (m/s)
-MAX_TRACKING_SPEED_MS: float  = 1.5    # Hard velocity cap (m/s) — SAFETY-CRITICAL
+MAX_TRACKING_SPEED_MS: float  = 3.0    # Hard velocity cap (m/s) — was 1.5; at 1.5 drone can't catch a walking person (1.4 m/s)
 
 # --- Standoff bearing hysteresis (S2.6) ---
 # Person must sustain motion above STANDOFF_VEL_THRESHOLD_MS for this long
@@ -303,7 +303,7 @@ GIMBAL_TILT_MAX_DEG: float = 45.0
 #  EXTENDED KALMAN FILTER  (person geolocation)
 # =============================================================================
 
-EKF_PROCESS_NOISE: list = [0.1, 0.1, 0.5, 0.5]   # Q diag: [pN, pE, vN, vE]
+EKF_PROCESS_NOISE: list = [0.2, 0.2, 1.5, 1.5]   # Q diag — was [0.1,0.1,0.5,0.5]; raised velocity to track direction changes faster
 EKF_MEAS_NOISE:    list = [2.0, 2.0]              # R diag: [pN, pE] (m²)
 EKF_GATE_SIGMA:    float = 3.0                    # Mahalanobis gate (σ)
 EKF_MAX_JUMP_M:    float = 30.0                   # Jump rejection — was 10m, raised so drone movement during LOITER doesn't reject all updates
@@ -320,7 +320,7 @@ CALIBRATION_YAML: str   = ""       # Path to calibration file; "" = auto-estimat
 
 # --- EKF projection fallbacks ---
 GIMBAL_TILT_DEFAULT_DEG: float = -45.0   # Used if real gimbal tilt not yet known
-DRONE_FOLLOW_DEADBAND_M: float = 2.0     # Position error below this = no horizontal command (matches GPS noise floor)
+DRONE_FOLLOW_DEADBAND_M: float = 1.0     # was 2.0 — too large; drone oscillated in/out of deadband with GPS noise
 DRONE_MAX_YAW_RATE_DEG: float  = 20.0    # Max body-yaw rate during pan recenter
 
 # --- Safety enhancements ---

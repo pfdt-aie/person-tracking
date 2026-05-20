@@ -1031,7 +1031,8 @@ class MAVLinkClient:
     # ------------------------------------------------------------------
 
     def send_velocity_ned(
-        self, vN: float, vE: float, vD: float = 0.0
+        self, vN: float, vE: float, vD: float = 0.0,
+        yaw_rad: float | None = None,
     ) -> None:
         """Send a velocity-only command in Earth NED frame.
 
@@ -1039,14 +1040,26 @@ class MAVLinkClient:
             vN: North velocity m/s.
             vE: East  velocity m/s.
             vD: Down  velocity m/s (0 = maintain altitude).
+            yaw_rad: Optional target heading in radians (0=N, π/2=E, in NED
+                     yaw frame).  When provided, the drone yaws to face this
+                     direction; otherwise yaw is ignored and ArduPilot keeps
+                     whatever heading it has.
 
         Safety: velocity is clamped by SafetyMonitor before sending.
         """
         vN, vE, vD = self._safety.check_velocity(vN, vE, vD)
+        if yaw_rad is None:
+            mask = _MASK_VEL_ONLY
+            yaw_val = 0.0
+        else:
+            # Clear the YAW_IGNORE bit (1024) so ArduPilot uses our yaw target.
+            mask = _MASK_VEL_ONLY & ~1024
+            yaw_val = float(yaw_rad)
         self._send_position_target(
-            0, 0, 0,   # position (ignored)
+            0, 0, 0,
             vN, vE, vD,
-            _MASK_VEL_ONLY,
+            mask,
+            yaw=yaw_val,
         )
 
     def send_position_velocity_ned(
@@ -1077,11 +1090,13 @@ class MAVLinkClient:
         pN: float, pE: float, pD: float,
         vN: float, vE: float, vD: float,
         type_mask: int,
+        yaw: float = 0.0,
+        yaw_rate: float = 0.0,
     ) -> None:
         """Low-level wrapper for SET_POSITION_TARGET_LOCAL_NED."""
         if self._mav is None:
             return
-        if not all(math.isfinite(v) for v in (pN, pE, pD, vN, vE, vD)):
+        if not all(math.isfinite(v) for v in (pN, pE, pD, vN, vE, vD, yaw, yaw_rate)):
             print(f"[MAVLink] WARN: Non-finite value in command — discarded "
                   f"pos=({pN:.2f},{pE:.2f},{pD:.2f}) vel=({vN:.2f},{vE:.2f},{vD:.2f})")
             return
@@ -1089,7 +1104,8 @@ class MAVLinkClient:
             self._log_ground_test(
                 f"pos_target mask=0x{type_mask:04x} "
                 f"pos=({pN:.2f},{pE:.2f},{pD:.2f}) "
-                f"vel=({vN:.2f},{vE:.2f},{vD:.2f})"
+                f"vel=({vN:.2f},{vE:.2f},{vD:.2f}) "
+                f"yaw={math.degrees(yaw):.0f}°"
             )
             return
         if not self._position_target_allowed(pN, pE, pD, vN, vE, vD, type_mask):
@@ -1104,7 +1120,7 @@ class MAVLinkClient:
                 pN, pE, pD,                                 # position (m)
                 vN, vE, vD,                                 # velocity (m/s)
                 0.0, 0.0, 0.0,                              # accel (ignored)
-                0.0, 0.0,                                   # yaw, yaw_rate (ignored)
+                yaw, yaw_rate,                              # yaw target (rad), yaw rate (rad/s)
             )
         except Exception as exc:
             print(f"[MAVLink] send_position_target error: {exc}")
