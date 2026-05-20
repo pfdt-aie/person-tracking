@@ -60,6 +60,8 @@ _CRITICAL_SENSORS: int = 0x01 | 0x02 | 0x04 | 0x08   # = 0x0F
 _MAV_CMD_DO_SET_MODE:              int = 176
 _MAV_CMD_NAV_TAKEOFF:              int = 22
 _MAV_MODE_FLAG_CUSTOM_MODE_ENABLED: int = 1
+_MAV_FRAME_LOCAL_NED:              int = 1    # MAV_FRAME_LOCAL_NED
+_MAV_CMD_COMPONENT_ARM_DISARM:     int = 400  # arm/disarm command
 
 
 class MAVLinkClient:
@@ -1133,7 +1135,7 @@ class MAVLinkClient:
                 0,                                          # time_boot_ms (unused)
                 self._mav.target_system,
                 self._mav.target_component,
-                mavutil.mavlink.MAV_FRAME_LOCAL_NED,        # frame = 1
+                _MAV_FRAME_LOCAL_NED,                       # frame = 1
                 type_mask,
                 pN, pE, pD,                                 # position (m)
                 vN, vE, vD,                                 # velocity (m/s)
@@ -1230,7 +1232,7 @@ class MAVLinkClient:
             print("[MAVLink] DISARM refused — FCU does not report landed")
             return False
         ok = self.send_command_with_ack(
-            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+            _MAV_CMD_COMPONENT_ARM_DISARM,
             p1=0,   # disarm
         )
         if ok:

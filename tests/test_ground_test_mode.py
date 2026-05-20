@@ -5,10 +5,6 @@ import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-import pytest
-
-pymavlink = pytest.importorskip("pymavlink")
-
 from mavlink_client.mavlink_client import MAVLinkClient
 from safety.safety import SafetyMonitor
 from config.settings import load_settings
