@@ -79,8 +79,9 @@ class Settings:
     bearing_slew_deg_s:     float = _cfg.BEARING_SLEW_DEG_S
 
     # --- Tracking-loss failsafes ---
-    lost_confirm_frames:      int = _cfg.LOST_CONFIRM_FRAMES
-    body_move_confirm_frames: int = _cfg.BODY_MOVE_CONFIRM_FRAMES
+    lost_confirm_frames:      int   = _cfg.LOST_CONFIRM_FRAMES
+    body_move_confirm_frames: int   = _cfg.BODY_MOVE_CONFIRM_FRAMES
+    body_confirm_window_s:    float = _cfg.BODY_CONFIRM_WINDOW_S
     tracking_loss_hover_s:  float = _cfg.TRACKING_LOSS_HOVER_S
     tracking_loss_loiter_s: float = _cfg.TRACKING_LOSS_LOITER_S
     tracking_loss_alert_s:  float = _cfg.TRACKING_LOSS_ALERT_S

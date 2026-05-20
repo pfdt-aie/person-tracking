@@ -97,11 +97,13 @@ class DroneController:
         self._rtl_issued:      bool  = False
         self._alert_issued:    bool  = False
 
-        # S1.5 — body-movement confirmation counter.  Drone body stays at
-        # zero velocity until BODY_MOVE_CONFIRM_FRAMES consecutive valid
-        # detections.  Gimbal control is independent and tracks immediately.
-        self._confirm_count:  int = 0
-        self._confirm_misses: int = 0   # consecutive missed frames; resets count only after threshold
+        # S1.5 — body-movement confirmation: drone body stays at zero velocity
+        # until person has been seen within the last body_confirm_window_s.
+        # Time-based approach replaces the fragile frame-counter which reset
+        # on every 6-frame absence — at 10 Hz that's 0.6 s, and alternating
+        # detect/miss patterns kept the counter permanently at 0-1.
+        # _last_detection timestamp already tracks this; is_body_confirmed()
+        # just checks its age.
 
         # S1.4 — retreat latch.  Once horizontal separation drops below
         # MIN_PERSON_DRONE_SEP_M, stay retreating until sep exceeds
@@ -155,35 +157,28 @@ class DroneController:
     # ------------------------------------------------------------------
 
     def notify_detection(self, detected: bool) -> None:
-        """Called every detection frame to update the tracking-loss timer.
-
-        Args:
-            detected: True if the person was detected this frame.
-        """
+        """Called every detection frame to update the tracking-loss timer."""
         now = time.monotonic()
         with self._lock:
             self._fps_times.append(now)   # S3.5 — sample for FPS window
             if detected:
-                self._confirm_misses  = 0
                 self._last_detection  = now
                 self._loiter_issued   = False
                 self._alert_issued    = False
-                if self._confirm_count < self._s.body_move_confirm_frames:
-                    self._confirm_count += 1
-            else:
-                # Only reset the confirmation counter after LOST_CONFIRM_FRAMES
-                # consecutive misses.  A single dropped frame (very common with
-                # FFmpeg grabber or ByteTrack re-ID flicker) was previously
-                # resetting the counter to 0 every other frame, making it
-                # impossible to reach the 5-frame threshold.
-                self._confirm_misses += 1
-                if self._confirm_misses >= self._s.lost_confirm_frames:
-                    self._confirm_count = 0
 
     def is_body_confirmed(self) -> bool:
-        """True once BODY_MOVE_CONFIRM_FRAMES consecutive detections seen."""
+        """True if person was seen within body_confirm_window_s seconds.
+
+        Time-based replaces the old frame-counter.  The frame-counter
+        required BODY_MOVE_CONFIRM_FRAMES consecutive frames, but with
+        alternating detect/miss patterns (every other frame, common with
+        FFmpeg + ByteTrack) the counter could never reach the threshold.
+        A 0.8 s window means: if person was detected at any point in the
+        last 0.8 s, allow drone body movement.
+        """
         with self._lock:
-            return self._confirm_count >= self._s.body_move_confirm_frames
+            age = time.monotonic() - self._last_detection
+        return age < self._s.body_confirm_window_s
 
     def effective_fps(self) -> float:
         """Rolling estimate of detection-loop FPS (S3.5).
@@ -445,17 +440,13 @@ class DroneController:
 
         # --- S1.5: Body-movement confirmation gate ---
         if not self.is_body_confirmed():
+            with self._lock:
+                age = time.monotonic() - self._last_detection
             if now - getattr(self, '_confirm_warn_t', 0.0) >= 2.0:
                 self._confirm_warn_t = now
-                get_flight_log().event(
-                    "body_confirm_wait",
-                    count=self._confirm_count,
-                    needed=self._s.body_move_confirm_frames,
-                )
                 from utils import terminal as _t
-                _t.log_only(f"[Drone] Body confirm: {self._confirm_count}/"
-                            f"{self._s.body_move_confirm_frames} consecutive detections "
-                            f"— holding until confirmed")
+                _t.log_only(f"[Drone] Body confirm waiting: last detection "
+                            f"{age:.1f}s ago (window {self._s.body_confirm_window_s:.1f}s)")
             self._mav.send_zero_velocity()
             return 0.0
 
@@ -1091,9 +1082,10 @@ class DroneController:
         self._prev_ae = 0.0
         self._loiter_issued   = False
         self._alert_issued    = False
-        self._confirm_count   = 0
-        self._confirm_misses  = 0
         self._retreating      = False
+        # Reset last_detection so body confirm requires a fresh detection
+        # after reset (don't inherit stale timestamp from before the reset).
+        self._last_detection  = 0.0
         self._last_person_sep_m = None
         self._last_vertical_clearance_m = None
         self._vel_above_t   = -1.0

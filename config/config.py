@@ -14,7 +14,7 @@ GIMBAL_PORT: int = 37260
 RTSP_URL: str    = "rtsp://192.168.144.25:8554/main.264"
 
 MODEL_PATH: str       = "models/yolo26s.engine"
-CONF_THRESHOLD: float = 0.30   # was 0.35 — alternating detection pattern in logs suggests too high
+CONF_THRESHOLD: float = 0.25   # was 0.35→0.30→0.25; alternating detect/miss in logs = threshold too high
 IMGSZ: int            = 640
 DETECT_DEVICE: str    = "auto"   # "auto" | "cpu" | "cuda:0" | "0"
 
@@ -254,7 +254,8 @@ TRACKING_LOSS_ALERT_S: float  = 20.0   # Seconds before GCS terminal alert
 # Gimbal tracks immediately; drone body stays at zero velocity until this many
 # consecutive frames have a valid detection. Prevents false-positive (bush/dog)
 # from yanking the airframe.
-BODY_MOVE_CONFIRM_FRAMES: int = 3    # was 5 — 3 frames at 10 Hz = 300ms confirmation
+BODY_MOVE_CONFIRM_FRAMES: int = 3    # kept for tests; replaced by time-based confirm
+BODY_CONFIRM_WINDOW_S: float = 0.8  # drone body moves if person seen within this window (s)
 
 # --- Latency floor for drone body control (S3.5) ---
 # When effective detection FPS drops below this, the drone body holds (sends
@@ -305,8 +306,8 @@ GIMBAL_TILT_MAX_DEG: float = 45.0
 
 EKF_PROCESS_NOISE: list = [0.2, 0.2, 1.5, 1.5]   # Q diag — was [0.1,0.1,0.5,0.5]; raised velocity to track direction changes faster
 EKF_MEAS_NOISE:    list = [2.0, 2.0]              # R diag: [pN, pE] (m²)
-EKF_GATE_SIGMA:    float = 3.0                    # Mahalanobis gate (σ)
-EKF_MAX_JUMP_M:    float = 50.0                   # Jump rejection — raised from 30m; close-range projections at steep angles produce large apparent jumps
+EKF_GATE_SIGMA:    float = 5.0                    # Mahalanobis gate — was 3.0; at 3σ gate_sq=9.0 rejected borderline measurements; 5σ is more appropriate for noisy GPS
+EKF_MAX_JUMP_M:    float = 60.0                   # Jump rejection — raised from 10→30→50→60m for steep-angle close-range projections
 
 # =============================================================================
 #  CAMERA INTRINSICS
