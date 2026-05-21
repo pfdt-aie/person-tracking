@@ -104,8 +104,8 @@ class TargetSmoother:
     Reduces jitter caused by single-frame YOLO detection noise.
 
     Args:
-        alpha: Smoothing factor. 0 = full smoothing (never moves),
-               1 = no smoothing (raw value). Default from config.
+        alpha: Old-value weight. 0 = raw value immediately,
+               1 = never moves. Default from config.
     """
 
     def __init__(self, alpha: float = cfg.TARGET_SMOOTH_ALPHA) -> None:

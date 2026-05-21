@@ -205,6 +205,49 @@ def test_lock_id_returns_locked_person():
     assert target is None
 
 
+def test_retargeting_to_another_visible_person_accepts_new_lock(monkeypatch):
+    """Changing lock from one visible person to another must not compare to old lock."""
+    now = [100.0]
+    monkeypatch.setattr("tracking.target_selector.time.time", lambda: now[0])
+
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    frame[100:300, 100:200] = (0, 0, 255)
+    frame[100:300, 360:460] = (255, 0, 0)
+
+    class _Boxes:
+        xyxy = _T([[100, 100, 200, 300], [360, 100, 460, 300]])
+        conf = _T([0.9, 0.88])
+        id   = _T([7, 8])
+        def __len__(self): return 2
+
+    class _Result:
+        boxes = _Boxes()
+        orig_img = frame
+
+    sel = TargetSelector(PersonRegistry())
+    state = _make_state()
+    sel.select([_Result()], state)
+    first_pid, second_pid = sorted(state.detected_ids)
+
+    state.lock_id = first_pid
+    first = sel.select([_Result()], state)
+    now[0] += 0.1
+    state.lock_id = second_pid
+    second = sel.select([_Result()], state)
+    status_after_retarget = state.target_status
+    now[0] += 0.1
+    state.lock_id = None
+    preview = sel.select([_Result()], state)
+
+    assert first is not None
+    assert second is not None
+    assert second.track_id == second_pid
+    assert second.is_fresh is True
+    assert status_after_retarget == "locked_visible"
+    assert preview is not None
+    assert preview.track_id == second_pid
+
+
 def test_locked_target_survives_brief_empty_result(monkeypatch):
     """A locked person should not be declared lost for one short detector dropout."""
     now = [100.0]

@@ -19,8 +19,8 @@ Velocity pipeline (per frame at 10 Hz):
 Failsafe hierarchy (tracking loss):
   0–2s   Use EKF prediction (maintain motion, gimbal searching)
   2–5s   Zero velocity → drone decelerates to hover
-  5–15s  LOITER command → drone holds position, GCS alert
-  >15s   Stay in LOITER; operator decides. Never auto-RTL on tracking loss.
+  5–15s  Stay in GUIDED with zero velocity, GCS alert
+  >15s   Continue GUIDED hover; operator decides. Never auto-RTL on tracking loss.
 
 Battery critical (separate failsafe):
   battery_voltage < CELL_CRITICAL_MV * N_cells → RTL immediately.
@@ -230,7 +230,8 @@ class DroneController:
         """Outer-loop update — compute and send drone velocity command.
 
         Call this at DRONE_CMD_RATE_HZ (10 Hz) regardless of detection status.
-        Always sends a command so ArduPilot GUID_TIMEOUT does not trigger.
+        Runs every tick so safety and tracking-loss logic are not tied to
+        detector FPS. Some pre-check failures intentionally suppress TX.
 
         Args:
             gimbal_pan_deg:          Current gimbal pan angle (degrees).

@@ -151,6 +151,8 @@ class TargetSelector:
         self._last_locked_id = lock_id
         self._last_locked_detection = detection
         self._last_locked_t = now
+        self._unlocked_target_id = lock_id
+        self._last_unlocked_t = now
         self._last_reacquire_reason = ""
 
     def _next_fallback_track_id(self) -> int:
@@ -222,7 +224,7 @@ class TargetSelector:
         frame_w: int,
         frame_h: int,
     ) -> bool:
-        if self._last_locked_detection is None:
+        if self._last_locked_detection is None or self._last_locked_id != locked.track_id:
             return True
         frame_diag = (frame_w * frame_w + frame_h * frame_h) ** 0.5
         max_dist = frame_diag * self._visible_max_center_ratio
