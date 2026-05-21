@@ -727,9 +727,11 @@ class PersonGimbalTracker:
                 and ts.mode == "AUTO"
             ),
         )
-        if pan_correction != 0.0 and ts.state == State.TRACKING:
+        if pan_correction != 0.0 and ts.state not in State.SEARCH_STATES:
             # pan_correction is rad/s; SIYI units = deg/s * (100 / full_scale_deg_s).
             # Missing the (100/60) factor was causing ~40% under-compensation.
+            # Applied in TRACKING, PREDICTING, and PRED_FADE — search states
+            # have their own correction block below.
             correction_speed = int(
                 math.degrees(pan_correction) * 100.0 / cfg.GIMBAL_SPEED_FULL_SCALE_DEG_S
             )
@@ -747,7 +749,7 @@ class PersonGimbalTracker:
                 and ts.state in State.SEARCH_STATES
                 and attitude_fresh
                 and abs(pan_deg) > cfg.GIMBAL_PAN_SOFT_DEG):
-            pan_correction = self.drone_ctrl._compute_yaw_correction(pan_deg, 0.1)
+            pan_correction = self.drone_ctrl._compute_yaw_correction(pan_deg)
             if pan_correction != 0.0:
                 correction_speed = int(
                     math.degrees(pan_correction) * 100.0 / cfg.GIMBAL_SPEED_FULL_SCALE_DEG_S
