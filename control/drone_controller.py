@@ -575,7 +575,7 @@ class DroneController:
                 return 0.0
 
         # --- Drone yaw correction for gimbal pan ---
-        pan_correction_rads = self._compute_yaw_correction(gimbal_pan_deg, dt)
+        pan_correction_rads = self._compute_yaw_correction(gimbal_pan_deg)
 
         # Cap smoother internal state to MAX_TRACKING_SPEED_MS so it cannot
         # wind up to huge values when the EKF has a wrong position estimate.
@@ -684,7 +684,7 @@ class DroneController:
             self._mav.send_zero_velocity()
             return 0.0
 
-        pan_correction_rads = self._compute_yaw_correction(gimbal_pan_deg, dt)
+        pan_correction_rads = self._compute_yaw_correction(gimbal_pan_deg)
 
         if not self._ekf.is_valid or not self._origin_set:
             self._mav.send_zero_velocity()
@@ -1046,7 +1046,7 @@ class DroneController:
     # ------------------------------------------------------------------
 
     def _compute_yaw_correction(
-        self, gimbal_pan_deg: float, dt: float
+        self, gimbal_pan_deg: float
     ) -> float:
         """Compute drone yaw rate to recenter gimbal pan.
 
@@ -1059,7 +1059,6 @@ class DroneController:
 
         Args:
             gimbal_pan_deg: Actual gimbal pan angle (degrees).
-            dt:             Time step (s).
 
         Returns:
             Gimbal pan correction rate (rad/s). Negative of drone yaw rate.
