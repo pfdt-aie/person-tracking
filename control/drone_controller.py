@@ -123,7 +123,9 @@ class DroneController:
 
         # S3.3 — session-time RTL. Timer starts on first armed-enable;
         # resets when the drone is disarmed (drone_tracking_enabled=False).
-        self._session_start_t: float = -1.0
+        # Sentinel: float('nan') = uninitialized (avoids collision with valid
+        # backdated timestamps on systems with uptime < MAX_FLIGHT_TIME_S).
+        self._session_start_t: float = float('nan')
         self._session_rtl_issued: bool = False
         self._rc_loss_loiter_issued: bool = False
 
@@ -233,7 +235,7 @@ class DroneController:
             # the operator can't bypass the 10-minute cap by toggling.  Only reset
             # when the FCU has been actually disarmed (motors stopped, on the ground).
             if not self._mav.is_armed():
-                self._session_start_t    = -1.0
+                self._session_start_t    = float('nan')
                 self._session_rtl_issued = False
             self._batt_low_warned = False   # reset so next follow session warns fresh
             return 0.0
@@ -244,7 +246,7 @@ class DroneController:
 
         # S3.3 — session-time RTL. Caps the autonomous-tracking session at
         # MAX_FLIGHT_TIME_S so a forgotten run can never exceed safe battery.
-        if self._session_start_t < 0:
+        if math.isnan(self._session_start_t):
             self._session_start_t = now
         if (now - self._session_start_t) >= self._s.max_flight_time_s:
             if not self._session_rtl_issued:
@@ -548,12 +550,29 @@ class DroneController:
         target_de = de - math.sin(bearing) * self._s.follow_standoff_m
         target_dist = math.hypot(target_dn, target_de)
 
-        # Proportional velocity toward standoff target + person feedforward
+        # Velocity feedforward — add EKF person velocity only when the person
+        # has been moving continuously for at least BEARING_LATCH_S seconds.
+        # This reuses the _vel_above_t latch already maintained by _update_bearing
+        # (called above). At hover the latch is inactive → zero feedforward → no
+        # GPS-velocity-noise-driven drift. When walking the latch fires after 1s
+        # of sustained motion → feedforward kicks in for anticipatory following.
+        # Cap is still applied to guard against transient EKF position-jump spikes.
+        ff_latch_active = (
+            self._vel_above_t >= 0.0
+            and (now - self._vel_above_t) >= self._s.bearing_latch_s
+        )
+        if ff_latch_active:
+            ff_cap = self._s.max_tracking_speed_ms * 0.5
+            vN_ff = max(-ff_cap, min(ff_cap, vN_p))
+            vE_ff = max(-ff_cap, min(ff_cap, vE_p))
+        else:
+            vN_ff = vE_ff = 0.0
+
         if target_dist < self._s.drone_follow_deadband_m:
             vN, vE = self._apply_smoother(0.0, 0.0, dt)
         else:
-            raw_vn = self._s.drone_kp * target_dn + vN_p
-            raw_ve = self._s.drone_kp * target_de + vE_p
+            raw_vn = self._s.drone_kp * target_dn + vN_ff
+            raw_ve = self._s.drone_kp * target_de + vE_ff
             vN, vE = self._apply_smoother(raw_vn, raw_ve, dt)
 
         # Standoff target position — reused by geofence and HOME keep-out checks.
@@ -696,7 +715,10 @@ class DroneController:
         # Skip separation / vertical-clearance guards — drone is on the bench.
 
         sep = math.hypot(pN - drone_pN, pE - drone_pE)
-        vN_p, vE_p = self._ekf.get_velocity_ned()
+        vN_p_raw, vE_p_raw = self._ekf.get_velocity_ned()
+        ff_cap = self._s.max_tracking_speed_ms * 0.5
+        vN_p = max(-ff_cap, min(ff_cap, vN_p_raw))
+        vE_p = max(-ff_cap, min(ff_cap, vE_p_raw))
         bearing = self._update_bearing(
             pN=pN, pE=pE,
             drone_pN=drone_pN, drone_pE=drone_pE, sep=max(sep, 0.1),

@@ -103,7 +103,14 @@ def test_sprint_startup_position_lag_under_half_metre_at_1s():
 # ---------------------------------------------------------------------------
 
 def test_velocity_decays_after_person_stops():
-    """After person stops, EKF velocity estimate must fall below 0.1 m/s within 1.5s."""
+    """After person stops, EKF velocity estimate must fall below 0.1 m/s within 3.0s.
+
+    Q_vel was reduced from 1.5 → 0.3 to eliminate GPS-velocity-noise-driven hover
+    oscillation (the feedforward term is now gated on the bearing latch, so a slower
+    EKF decay has no effect on drone behaviour — the drone stops sending feedforward
+    the moment the person's EKF speed drops below STANDOFF_VEL_THRESHOLD_MS for 1s).
+    The decay horizon is updated from 1.5s to 3.0s to match Q_vel=0.3 dynamics.
+    """
     ekf = PersonEKF()
     ekf.update(0.0, 0.0)
     dt = 0.1
@@ -114,14 +121,14 @@ def test_velocity_decays_after_person_stops():
         ekf.predict(dt)
         ekf.update(pos, 0.0)
 
-    # Now stop
+    # Now stop — 3.0s horizon matches Q_vel=0.3 decay rate
     stop_pos = pos
-    for _ in range(15):   # 1.5s
+    for _ in range(30):   # 3.0s
         ekf.predict(dt)
         ekf.update(stop_pos, 0.0)
 
     vN, _ = ekf.get_velocity_ned()
-    assert abs(vN) < 0.1, f"Velocity after 1.5s stop = {vN:.3f} m/s, expected < 0.1"
+    assert abs(vN) < 0.1, f"Velocity after 3.0s stop = {vN:.3f} m/s, expected < 0.1"
 
 
 # ---------------------------------------------------------------------------

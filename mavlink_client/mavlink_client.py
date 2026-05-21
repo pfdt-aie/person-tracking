@@ -576,9 +576,11 @@ class MAVLinkClient:
             # spammed at ~2 Hz; detection will still re-run each tick in case
             # the voltage settles into a non-ambiguous range.
             self._cell_ambig_warned = True
+            nom_mv = self._s.cell_nominal_mv
+            ratio_display = v_mv / nom_mv if nom_mv > 0 else 0.0
             print(
                 f"[MAVLink] Battery cell detection ambiguous "
-                f"({v_mv}mV / {nominal}mV = {ratio:.2f}, "
+                f"({v_mv}mV / {nom_mv}mV = {ratio_display:.2f}, "
                 f"confidence={confidence}) — using default "
                 f"{self._s.default_cells}S. Override with --cells N. "
                 f"(suppressing further ambiguity warnings this session)"

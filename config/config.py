@@ -207,7 +207,7 @@ MIN_PERSON_DRONE_SEP_M: float = 4.0    # Hard minimum separation — retreat if 
 MIN_VERTICAL_SEP_M: float     = 3.0    # Soft vertical clearance above person (m)
 RETREAT_SPEED_MS: float       = 1.0    # Speed used when actively backing away from subject
 RETREAT_HYSTERESIS_M: float   = 1.5    # Re-engage follow only when sep > MIN_SEP + this (m)
-STANDOFF_VEL_THRESHOLD_MS: float = 0.3 # Use person velocity direction above this speed (m/s)
+STANDOFF_VEL_THRESHOLD_MS: float = 0.6 # Use person velocity direction above this speed (m/s) — raised from 0.3: with Q_vel=0.3 the EKF velocity noise magnitude is ~0.36 m/s; threshold must be >noise so position-based bearing is used at hover
 MAX_TRACKING_SPEED_MS: float  = 3.0    # Hard velocity cap (m/s) — was 1.5; at 1.5 drone can't catch a walking person (1.4 m/s)
 
 # --- Standoff bearing hysteresis (S2.6) ---
@@ -240,7 +240,7 @@ DRONE_KP_YAW: float = 0.6    # Gimbal pan angle → drone yaw rate (rad/s per de
 # --- Velocity smoothing ---
 VEL_EMA_ALPHA: float  = 0.35    # EMA filter factor — raised for faster response
 MAX_JERK_MS3: float   = 5.0     # Jerk limit (m/s³) — was 2.0, raised for faster ramp
-MAX_ACCEL_MS2: float  = 2.0     # Hard acceleration cap (m/s²) — was 0.5 (took 3 s to reach speed)
+MAX_ACCEL_MS2: float  = 1.5     # Hard acceleration cap (m/s²) — reduced from 2.0 for smoother motion; 1.5 still ramps to 3 m/s in 2s, faster than a walking person
 
 # --- MAVLink send rate ---
 DRONE_CMD_RATE_HZ: int   = 10   # Velocity command send rate
@@ -304,7 +304,7 @@ GIMBAL_TILT_MAX_DEG: float = 45.0
 #  EXTENDED KALMAN FILTER  (person geolocation)
 # =============================================================================
 
-EKF_PROCESS_NOISE: list = [0.2, 0.2, 1.5, 1.5]   # Q diag — was [0.1,0.1,0.5,0.5]; raised velocity to track direction changes faster
+EKF_PROCESS_NOISE: list = [0.2, 0.2, 0.3, 0.3]   # Q diag — velocity reduced from 1.5→0.3: Q_vel=1.5 caused ±0.52 m/s feedforward noise at hover (EKF velocity exceeded STANDOFF_VEL_THRESHOLD 74% of time at standstill, causing bearing oscillation)
 EKF_MEAS_NOISE:    list = [2.0, 2.0]              # R diag: [pN, pE] (m²)
 EKF_GATE_SIGMA:    float = 5.0                    # Mahalanobis gate — was 3.0; at 3σ gate_sq=9.0 rejected borderline measurements; 5σ is more appropriate for noisy GPS
 EKF_MAX_JUMP_M:    float = 60.0                   # Jump rejection — raised from 10→30→50→60m for steep-angle close-range projections
@@ -321,7 +321,7 @@ CALIBRATION_YAML: str   = ""       # Path to calibration file; "" = auto-estimat
 
 # --- EKF projection fallbacks ---
 GIMBAL_TILT_DEFAULT_DEG: float = -45.0   # Used if real gimbal tilt not yet known
-DRONE_FOLLOW_DEADBAND_M: float = 1.0     # was 2.0 — too large; drone oscillated in/out of deadband with GPS noise
+DRONE_FOLLOW_DEADBAND_M: float = 1.5     # raised from 1.0: 1.0m deadband too close to GPS noise floor (~0.8m), causing 1-2 Hz in/out oscillation at hover
 DRONE_MAX_YAW_RATE_DEG: float  = 20.0    # Max body-yaw rate during pan recenter
 
 # --- Safety enhancements ---

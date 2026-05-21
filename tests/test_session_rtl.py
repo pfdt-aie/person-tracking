@@ -106,7 +106,7 @@ def _controller(mav, safety):
     c._vel_above_t = -1.0
     c._bearing_rad = 0.0
     c._bearing_init = False
-    c._session_start_t = -1.0
+    c._session_start_t = float('nan')
     c._session_rtl_issued = False
     c._rc_loss_loiter_issued = False
     c._fps_times = deque(maxlen=cfg.FPS_WINDOW_SIZE)
@@ -121,7 +121,8 @@ def test_disarmed_keeps_timer_inactive():
     mav = _FakeMav()
     c = _controller(mav, _FakeSafety())
     c.update(0.0, -45.0, None, drone_tracking_enabled=False)
-    assert c._session_start_t < 0
+    import math
+    assert math.isnan(c._session_start_t)
     assert mav.rtl_calls == 0
 
 
@@ -133,12 +134,23 @@ def test_armed_starts_timer():
     assert c._session_start_t > 0
 
 
+def _expire_session(c) -> None:
+    """Force the session timer to appear expired by setting it to 0.0.
+
+    time.monotonic() is always >> MAX_FLIGHT_TIME_S once the system has been
+    up for more than a few seconds, so 0.0 is always "more than 600 s ago".
+    Using `c._session_start_t -= 601` is fragile: on a freshly booted system
+    (uptime < 601 s) the subtraction yields a negative value which the NaN
+    sentinel guard treats as uninitialised and resets to now.
+    """
+    c._session_start_t = 0.0   # always expired: monotonic() >> MAX_FLIGHT_TIME_S
+
+
 def test_rtl_fires_after_max_flight_time():
     mav = _FakeMav()
     c = _controller(mav, _FakeSafety())
     c.update(0.0, -45.0, None, drone_tracking_enabled=True)
-    # Backdate the session start past the limit
-    c._session_start_t -= cfg.MAX_FLIGHT_TIME_S + 1.0
+    _expire_session(c)
     c.update(0.0, -45.0, None, drone_tracking_enabled=True)
     assert mav.rtl_calls == 1
     assert c._session_rtl_issued is True
@@ -148,7 +160,7 @@ def test_rtl_fires_only_once_per_session():
     mav = _FakeMav()
     c = _controller(mav, _FakeSafety())
     c.update(0.0, -45.0, None, drone_tracking_enabled=True)
-    c._session_start_t -= cfg.MAX_FLIGHT_TIME_S + 5.0
+    _expire_session(c)
     for _ in range(5):
         c.update(0.0, -45.0, None, drone_tracking_enabled=True)
     assert mav.rtl_calls == 1
@@ -158,13 +170,14 @@ def test_disarm_clears_timer_and_latch():
     mav = _FakeMav()
     c = _controller(mav, _FakeSafety())
     c.update(0.0, -45.0, None, drone_tracking_enabled=True)
-    c._session_start_t -= cfg.MAX_FLIGHT_TIME_S + 1.0
+    _expire_session(c)
     c.update(0.0, -45.0, None, drone_tracking_enabled=True)
     assert c._session_rtl_issued is True
     # FCU disarms — timer must reset (unfollow alone no longer resets it)
     mav.armed = False
     c.update(0.0, -45.0, None, drone_tracking_enabled=False)
-    assert c._session_start_t < 0
+    import math
+    assert math.isnan(c._session_start_t)
     assert c._session_rtl_issued is False
 
 
