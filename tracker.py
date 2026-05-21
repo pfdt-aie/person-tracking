@@ -63,6 +63,14 @@ def _display_available() -> bool:
     return True
 
 
+def _allow_armed_outdoor_bypass(item) -> bool:
+    """Only GPS/HOME may be advisory once the FCU is already armed."""
+    return bool(getattr(item, "outdoor_only", False)) and item.name in {
+        "GPS fix OK",
+        "HOME position set",
+    }
+
+
 class PersonGimbalTracker:
     """Mission-runtime orchestrator — wires subsystems and runs the main loop.
 
@@ -511,7 +519,10 @@ class PersonGimbalTracker:
         # operator does not need to wait for the Jetson's own EKF stream to
         # fill in after the FCU is already flying.
         fcu_armed = self.mav.is_armed()
-        bad = [c for c in items if not c.ok and (not c.outdoor_only or not fcu_armed)]
+        bad = [
+            c for c in items
+            if not c.ok and not (fcu_armed and _allow_armed_outdoor_bypass(c))
+        ]
         if bad:
             failing = ", ".join(c.name for c in bad)
             return {"following": False, "status": "error",
@@ -522,7 +533,10 @@ class PersonGimbalTracker:
         # so the controller can resume issuing commands.
         self.mav.clear_rc_override()
         self._ts.drone_following = True
-        skipped = [c for c in items if not c.ok and c.outdoor_only and fcu_armed]
+        skipped = [
+            c for c in items
+            if not c.ok and fcu_armed and _allow_armed_outdoor_bypass(c)
+        ]
         if skipped:
             names = ", ".join(c.name for c in skipped)
             print(f"[Follow] Drone-body following ENABLED — GPS/HOME bypassed (FCU armed): {names}")
@@ -585,7 +599,10 @@ class PersonGimbalTracker:
 
         items = self.preflight.run()
         fcu_armed = self.mav.is_armed()
-        bad = [c for c in items if not c.ok and (not c.outdoor_only or not fcu_armed)]
+        bad = [
+            c for c in items
+            if not c.ok and not (fcu_armed and _allow_armed_outdoor_bypass(c))
+        ]
         if bad:
             failing = ", ".join(c.name for c in bad)
             return {"status": "error", "altitude_m": alt,
@@ -703,7 +720,11 @@ class PersonGimbalTracker:
         # Without a lock, the gimbal still tracks whoever it sees, but the drone
         # hovers — prevents following the wrong person before operator confirms.
         locked_target = fresh_target if (detected_for_drone and ts.lock_id is not None) else None
-        self.drone_ctrl.notify_detection(locked_target is not None)
+        # Visual lock alone is not enough to keep body motion authorised:
+        # stale gimbal attitude or failed camera projection would make the EKF
+        # predict from old geometry. The controller confirms body freshness
+        # only after an accepted EKF measurement.
+        self.drone_ctrl.notify_detection(locked_target is not None, confirm_body=False)
 
         attitude_fresh = self.ctrl.attitude_is_fresh()
         pan_deg = self.ctrl.gimbal_pan_deg
@@ -862,6 +883,11 @@ class PersonGimbalTracker:
 
                 frame, is_new = self.grabber.get_frame()
                 if frame is None:
+                    # Keep MAVLink-side failsafes ticking even when video is
+                    # unavailable; battery/RC/geofence logic must not depend
+                    # on successful camera reads.
+                    if self._drone_enabled:
+                        self._update_drone_outer_loop(now, False, None)
                     if not self.grabber.is_connected():
                         self._gsm.reset_all()
                         if self._drone_enabled:
@@ -876,6 +902,11 @@ class PersonGimbalTracker:
                     continue
 
                 if not is_new:
+                    # A stalled/repeated frame is not a valid tracking update,
+                    # but the drone safety loop still needs its 10 Hz chance
+                    # to hold, RTL, or detect RC/GPS/heartbeat loss.
+                    if self._drone_enabled:
+                        self._update_drone_outer_loop(now, False, None)
                     if not self.grabber.is_connected():
                         self._gsm.reset_all()
                         if self._drone_enabled:

@@ -110,8 +110,13 @@ class TargetSmoother:
 
     def __init__(self, alpha: float = cfg.TARGET_SMOOTH_ALPHA) -> None:
         self.alpha = alpha
+        self.fast_alpha = min(alpha, cfg.TARGET_SMOOTH_ALPHA_FAST)
+        self.fast_px_s = cfg.TARGET_SMOOTH_FAST_PX_S
         self.cx: float | None = None
         self.cy: float | None = None
+        self._last_raw_x: float | None = None
+        self._last_raw_y: float | None = None
+        self._last_t: float | None = None
 
     def update(self, rx: float, ry: float) -> tuple[float, float]:
         """Update with a new raw centroid and return the smoothed value.
@@ -123,14 +128,31 @@ class TargetSmoother:
         Returns:
             (smoothed_cx, smoothed_cy)
         """
+        now = time.time()
         if self.cx is None:
             self.cx, self.cy = rx, ry
         else:
-            self.cx = self.alpha * self.cx + (1 - self.alpha) * rx
-            self.cy = self.alpha * self.cy + (1 - self.alpha) * ry
+            alpha = self._adaptive_alpha(rx, ry, now)
+            self.cx = alpha * self.cx + (1 - alpha) * rx
+            self.cy = alpha * self.cy + (1 - alpha) * ry
+        self._last_raw_x = rx
+        self._last_raw_y = ry
+        self._last_t = now
         return self.cx, self.cy  # type: ignore[return-value]
+
+    def _adaptive_alpha(self, rx: float, ry: float, now: float) -> float:
+        """Use less lag when the person is genuinely moving in the frame."""
+        if self._last_raw_x is None or self._last_raw_y is None or self._last_t is None:
+            return self.alpha
+        dt = max(1e-3, now - self._last_t)
+        speed = (((rx - self._last_raw_x) ** 2 + (ry - self._last_raw_y) ** 2) ** 0.5) / dt
+        t = max(0.0, min(1.0, speed / max(self.fast_px_s, 1.0)))
+        return self.alpha + t * (self.fast_alpha - self.alpha)
 
     def reset(self) -> None:
         """Clear smoothed state (call when tracking is re-acquired)."""
         self.cx = None
         self.cy = None
+        self._last_raw_x = None
+        self._last_raw_y = None
+        self._last_t = None

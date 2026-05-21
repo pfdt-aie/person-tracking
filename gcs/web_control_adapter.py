@@ -71,10 +71,17 @@ class WebControlAdapter:
 
         if nx is None:
             snap = dict(state.detected_ids)
-            return {'lock_id': state.lock_id, 'ids': list(snap.keys())}
+            return {
+                'lock_id': state.lock_id,
+                'ids': list(snap.keys()),
+                'target_status': state.target_status,
+                'target_warning': state.target_warning,
+            }
 
         if nx == -1.0:
             state.lock_id = None
+            state.target_status = "unlocked"
+            state.target_warning = ""
             print("[CLICK] Unlocked — auto mode")
             return {'status': 'unlocked', 'lock_id': None}
 
@@ -99,16 +106,22 @@ class WebControlAdapter:
         if best_id is None:
             if state.lock_id is not None:
                 state.lock_id = None
+                state.target_status = "unlocked"
+                state.target_warning = ""
                 print("[CLICK] Unlocked — clicked empty space")
                 return {'status': 'unlocked', 'lock_id': None}
             return {'status': 'miss', 'msg': 'No person at that position'}
 
         if state.lock_id == best_id:
             state.lock_id = None
+            state.target_status = "unlocked"
+            state.target_warning = ""
             print(f"[CLICK] Unlocked — toggled off ID {best_id}")
             return {'status': 'unlocked', 'lock_id': None}
 
         state.lock_id = best_id
+        state.target_status = "locked_pending"
+        state.target_warning = "waiting for next confirmed detection"
         print(f"[CLICK] Locked → ID {best_id}")
         return {'status': 'locked', 'id': best_id, 'lock_id': best_id}
 

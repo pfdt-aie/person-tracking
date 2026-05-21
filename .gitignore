@@ -17,6 +17,9 @@ env/
 logs/
 recordings/
 *.log
+*.tlog
+*.tlog.raw
+mav.parm
 debug_frame_*.jpg
 gpu_frame_*.jpg
 

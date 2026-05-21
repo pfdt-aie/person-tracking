@@ -47,6 +47,8 @@ DEAD_ZONE: float             = 0.06       # stops chasing sub-pixel jitter
 MAX_GIMBAL_SPEED: int        = 35         # limits overshoot
 GIMBAL_MIN_SPEED: int        = 8          # below this the gimbal stalls
 TARGET_SMOOTH_ALPHA: float   = 0.65       # ~120 ms lag at 25 fps
+TARGET_SMOOTH_ALPHA_FAST: float = 0.35    # lower old-weight = faster response for walking/running target
+TARGET_SMOOTH_FAST_PX_S: float  = 450.0   # pixel speed where smoother reaches FAST alpha
 GIMBAL_CMD_MIN_INTERVAL: float = 0.05
 MANUAL_GIMBAL_SPEED: int       = 40     # gimbal pan/tilt speed in MANUAL mode (0–100)
 
@@ -101,6 +103,9 @@ LOCK_TARGET_GRACE_S: float  = 0.4  # Keep a locked target through brief detector
 LOCK_REACQUIRE_CENTER_RATIO: float = 0.25  # Max centre jump as fraction of frame diagonal
 LOCK_REACQUIRE_STRICT_CENTER_RATIO: float = 0.08  # Allow no-overlap reacquire only very nearby
 LOCK_REACQUIRE_MIN_IOU: float = 0.05  # Otherwise require some bbox overlap before remapping lock
+LOCK_REACQUIRE_MIN_APPEARANCE: float = 0.72  # Require candidate to resemble locked person before remap/body follow
+LOCK_REACQUIRE_AMBIGUITY_MARGIN: float = 0.12  # Hold if best and second-best candidates are too close
+LOCK_VISIBLE_MAX_CENTER_RATIO: float = 0.22  # Sanity-check even when registry says locked ID is visible
 
 # =============================================================================
 #  PERSON RE-IDENTIFICATION  (PersonRegistry thresholds)

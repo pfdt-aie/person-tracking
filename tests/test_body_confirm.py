@@ -10,6 +10,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import config as cfg
 from config.settings import load_settings
 from control.drone_controller import DroneController
+from tracking.target_detection import TargetDetection
 
 
 def _controller() -> DroneController:
@@ -58,6 +59,108 @@ def test_false_detection_does_not_break_confirm():
     for _ in range(6):
         c.notify_detection(False)
     assert c.is_body_confirmed() is True
+
+
+def test_visual_detection_can_skip_body_confirmation():
+    c = _controller()
+
+    c.notify_detection(True, confirm_body=False)
+
+    assert c.is_body_confirmed() is False
+    assert len(c._fps_times) == 1
+
+
+class _Geo:
+    def __init__(self, result=(0.0, 0.00001)):
+        self.result = result
+
+    def project(self, *args):
+        return self.result
+
+
+class _Mav:
+    def get_gps(self):
+        return 0.0, 0.0, 7.0
+
+    def get_attitude(self):
+        return 0.0, 0.0, 0.0
+
+
+class _AcceptingEkf:
+    def __init__(self, accepted=True):
+        self.accepted = accepted
+        self.updates = []
+
+    def gps_to_ned(self, lat, lon, origin_lat, origin_lon):
+        return lat * 1000.0, lon * 1000.0
+
+    def update(self, meas_n, meas_e):
+        self.updates.append((meas_n, meas_e))
+        return self.accepted
+
+
+def _target():
+    return TargetDetection(
+        cx=100.0, cy=120.0,
+        x1=80.0, y1=90.0, x2=120.0, y2=150.0,
+        conf=0.9, track_id=1,
+    )
+
+
+def test_accepted_ekf_measurement_confirms_body_motion():
+    c = _controller()
+    c._origin_set = True
+    c._origin_lat = 0.0
+    c._origin_lon = 0.0
+    c._frame_w = 1280
+    c._frame_h = 720
+    c._gimbal_pan_rad = 0.0
+    c._gimbal_tilt_rad = -0.7
+    c._mav = _Mav()
+    c._geo = _Geo()
+    c._ekf = _AcceptingEkf(accepted=True)
+
+    assert c._update_ekf_from_detection(_target(), time.monotonic()) is True
+
+    assert c.is_body_confirmed() is True
+    assert c._loiter_issued is False
+    assert c._alert_issued is False
+
+
+def test_rejected_ekf_measurement_does_not_confirm_body_motion():
+    c = _controller()
+    c._origin_set = True
+    c._origin_lat = 0.0
+    c._origin_lon = 0.0
+    c._frame_w = 1280
+    c._frame_h = 720
+    c._gimbal_pan_rad = 0.0
+    c._gimbal_tilt_rad = -0.7
+    c._mav = _Mav()
+    c._geo = _Geo()
+    c._ekf = _AcceptingEkf(accepted=False)
+
+    assert c._update_ekf_from_detection(_target(), time.monotonic()) is False
+
+    assert c.is_body_confirmed() is False
+
+
+def test_failed_projection_does_not_confirm_body_motion():
+    c = _controller()
+    c._origin_set = True
+    c._origin_lat = 0.0
+    c._origin_lon = 0.0
+    c._frame_w = 1280
+    c._frame_h = 720
+    c._gimbal_pan_rad = 0.0
+    c._gimbal_tilt_rad = -0.7
+    c._mav = _Mav()
+    c._geo = _Geo(result=None)
+    c._ekf = _AcceptingEkf(accepted=True)
+
+    assert c._update_ekf_from_detection(_target(), time.monotonic()) is False
+
+    assert c.is_body_confirmed() is False
 
 
 # ---------------------------------------------------------------------------

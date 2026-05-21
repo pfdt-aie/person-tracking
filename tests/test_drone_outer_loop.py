@@ -32,8 +32,8 @@ class _DroneCtrl:
         self.update_calls = []
         self._correction = correction
 
-    def notify_detection(self, detected):
-        self.notify_calls.append(detected)
+    def notify_detection(self, detected, *, confirm_body=True):
+        self.notify_calls.append((detected, confirm_body))
 
     def set_gimbal_angles(self, pan_rad, tilt_rad):
         self.angle_calls.append((pan_rad, tilt_rad))
@@ -76,7 +76,7 @@ def test_drone_outer_loop_runs_update_when_attitude_stale():
 
     t._update_drone_outer_loop(1.0, person_detected=True, target_info=target)
 
-    assert t.drone_ctrl.notify_calls == [True]
+    assert t.drone_ctrl.notify_calls == [(True, False)]
     assert t.drone_ctrl.angle_calls == []
     assert len(t.drone_ctrl.update_calls) == 1
     call = t.drone_ctrl.update_calls[0]
@@ -93,6 +93,7 @@ def test_drone_outer_loop_uses_target_when_attitude_fresh():
 
     t._update_drone_outer_loop(1.0, person_detected=True, target_info=target)
 
+    assert t.drone_ctrl.notify_calls == [(True, False)]
     assert len(t.drone_ctrl.angle_calls) == 1
     assert t.drone_ctrl.update_calls[0]["target_info"] is target
     assert t.ctrl.speed_calls
@@ -105,7 +106,7 @@ def test_drone_outer_loop_treats_grace_target_as_not_detected():
 
     t._update_drone_outer_loop(1.0, person_detected=True, target_info=target)
 
-    assert t.drone_ctrl.notify_calls == [False]
+    assert t.drone_ctrl.notify_calls == [(False, False)]
     assert t.drone_ctrl.update_calls[0]["target_info"] is None
 
 

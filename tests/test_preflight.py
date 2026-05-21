@@ -83,6 +83,15 @@ class _FailVerifier:
         return [ParamCheck("FENCE_ENABLE", False, 0.0, "0.0 == 1.0")]
 
 
+class _LoadingVerifier:
+    def run(self):
+        from mavlink_client.param_verifier import ParamCheck
+        return [
+            ParamCheck("FENCE_ENABLE", False, None, "not advertised by FCU"),
+            ParamCheck("RTL_ALT", False, None, "not advertised by FCU"),
+        ]
+
+
 def _pf(mav_kwargs=None, ground_test=False, verifier=None):
     mav_kwargs = mav_kwargs or {}
     return PreflightCheck(
@@ -216,6 +225,17 @@ def test_param_failure_blocks_all_pass():
     assert pf.all_pass() is False
     items = {c.name: c for c in pf.run()}
     assert items["ArduPilot params correct"].ok is False
+
+
+def test_param_loading_is_not_outdoor_only():
+    """SAFETY — params that are still loading are retryable, but they are
+    not GPS/HOME-style outdoor-only waits and must remain hard flight gates."""
+    pf = _pf(verifier=_LoadingVerifier())
+    items = {c.name: c for c in pf.run()}
+    params = items["ArduPilot params correct"]
+    assert params.ok is False
+    assert params.outdoor_only is False
+    assert "not advertised" in params.message
 
 
 def test_rc_disconnected_blocks_arm():

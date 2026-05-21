@@ -21,6 +21,8 @@ class TrackerState:
     # --- Target selection ---
     lock_id:      Optional[int]          = None
     detected_ids: dict                   = field(default_factory=dict)  # dict[int, TargetDetection]
+    target_status:  str = "unlocked"
+    target_warning: str = ""
 
     # --- Mode ---
     mode: str = "AUTO"   # "AUTO" | "MANUAL"

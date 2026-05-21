@@ -125,3 +125,25 @@ def test_target_smoother_converges():
         cx, cy = sm.update(100.0, 200.0)
     assert abs(cx - 100.0) < 1.0
     assert abs(cy - 200.0) < 1.0
+
+
+def test_target_smoother_responds_faster_to_real_motion(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr("control.pid_controller.time.time", lambda: now[0])
+
+    slow = TargetSmoother(alpha=0.8)
+    slow.fast_alpha = 0.2
+    slow.fast_px_s = 100.0
+    slow.update(0.0, 0.0)
+    now[0] += 0.1
+    slow_x, _ = slow.update(1.0, 0.0)
+
+    fast = TargetSmoother(alpha=0.8)
+    fast.fast_alpha = 0.2
+    fast.fast_px_s = 100.0
+    fast.update(0.0, 0.0)
+    now[0] += 0.1
+    fast_x, _ = fast.update(100.0, 0.0)
+
+    assert slow_x < 0.5
+    assert fast_x > 70.0

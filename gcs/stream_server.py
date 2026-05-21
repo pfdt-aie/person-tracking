@@ -532,6 +532,10 @@ function syncTelemetry(d) {{
     if (p.vertical_clearance_m != null) parts.push('clr ' + p.vertical_clearance_m + 'm');
     if (p.retreating) parts.push('RETREAT');
   }}
+  if (d.lock_id != null && d.target_status) {{
+    parts.push('lock ' + d.target_status);
+    if (d.target_warning) parts.push(d.target_warning);
+  }}
   if (d.landed_fcu) parts.push('LANDED');
   if (d.tracking_loss_s != null && d.tracking_loss_s > 1.0)
     parts.push('lost ' + d.tracking_loss_s + 's');

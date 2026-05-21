@@ -146,6 +146,16 @@ class HudRenderer:
                     f"Sz:{t.telem_bbox_ratio:.0%}",
                     (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 200, 255), 1)
         y += 16
+        if getattr(t._ts, "lock_id", None) is not None:
+            lock_status = getattr(t._ts, "target_status", "")
+            lock_warn = getattr(t._ts, "target_warning", "")
+            lock_text = f"Lock:{lock_status}"
+            if lock_warn:
+                lock_text += f" {lock_warn[:42]}"
+            lock_col = (0, 255, 0) if lock_status in ("locked_visible", "lock_reacquired") else (0, 200, 255)
+            cv2.putText(frame, lock_text,
+                        (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.36, lock_col, 1)
+            y += 16
 
         cv2.putText(frame, f"P:{t.fps:.0f} G:{t.grabber.grab_fps:.0f}",
                     (w - 120, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 255, 0), 1)

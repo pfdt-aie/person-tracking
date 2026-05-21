@@ -85,6 +85,51 @@ def test_ack_registry_cleaned_up_on_timeout():
         assert CMD not in client._ack_events
 
 
+def test_same_command_ack_waiters_are_serialized():
+    """Concurrent mode requests share MAV_CMD_DO_SET_MODE.
+
+    Without command serialization, the second waiter can replace the first
+    waiter's ACK event and steal its COMMAND_ACK.
+    """
+    client = _client_with_mock_mav()
+    CMD = 176
+    send_count = 0
+    send_count_lock = threading.Lock()
+    first_send_started = threading.Event()
+    release_first_send = threading.Event()
+
+    def patched_send(*args, **kwargs):
+        nonlocal send_count
+        with send_count_lock:
+            send_count += 1
+            n = send_count
+        if n == 1:
+            first_send_started.set()
+            release_first_send.wait(timeout=1.0)
+        _simulate_ack(client, CMD, result=0, delay=0.01)
+
+    client._mav.mav.command_long_send = patched_send
+    results = []
+
+    def call_command():
+        results.append(client.send_command_with_ack(CMD, timeout=0.5, retries=1))
+
+    t1 = threading.Thread(target=call_command)
+    t2 = threading.Thread(target=call_command)
+    t1.start()
+    assert first_send_started.wait(timeout=0.5)
+    t2.start()
+    time.sleep(0.05)
+    with client._ack_lock:
+        assert len(client._ack_events) == 1
+    release_first_send.set()
+    t1.join(timeout=1.0)
+    t2.join(timeout=1.0)
+
+    assert results == [True, True]
+    assert send_count == 2
+
+
 def test_no_mav_returns_false():
     from safety.safety import SafetyMonitor
     client = MAVLinkClient(safety=SafetyMonitor(), device="/dev/null", baud=9600)

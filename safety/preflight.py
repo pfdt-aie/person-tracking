@@ -298,14 +298,13 @@ class PreflightCheck:
         # operator-input printer can split them onto separate lines.
         detail = "; ".join(f"{r.name}: {r.message}" for r in bad)
         # If every failure is "not advertised by FCU" the batch prefetch has
-        # not finished yet — treat as WAIT so the operator knows to retry
-        # rather than run to Mission Planner.
-        all_loading = all("not advertised" in r.message for r in bad)
+        # not finished yet. This is still a hard flight gate: unlike GPS/HOME,
+        # parameter verification is not an outdoor-only condition and must not
+        # be bypassed just because the FCU is already armed.
         return PreflightItem(
             name="ArduPilot params correct",
             ok=False,
             message=f"{len(bad)} failing — {detail}",
-            outdoor_only=all_loading,
         )
 
     def _check_battery(self) -> PreflightItem:

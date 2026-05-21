@@ -93,6 +93,10 @@ class MAVLinkClient:
         self._ack_lock:    threading.Lock                   = threading.Lock()
         self._ack_events:  dict[int, threading.Event]       = {}
         self._ack_results: dict[int, int]                   = {}
+        # COMMAND_ACK only identifies the command type. Serialise command_long
+        # calls so concurrent mode/takeoff/estop requests cannot consume each
+        # other's ACK when they share the same command ID.
+        self._command_lock: threading.Lock                  = threading.Lock()
 
         # Telemetry cache — updated by _rx_loop under _lock
         self._pos_n:        float = 0.0    # NED north offset from EKF origin (m)
@@ -192,7 +196,9 @@ class MAVLinkClient:
                 self._device, baud=self._baud, source_system=255
             )
             print("[MAVLink] Waiting for heartbeat...")
-            self._mav.wait_heartbeat(timeout=10)
+            hb = self._mav.wait_heartbeat(timeout=10)
+            if hb is None:
+                raise TimeoutError("heartbeat timeout")
             self._hb_time = time.monotonic()
             print(
                 f"[MAVLink] Connected — "
@@ -201,6 +207,13 @@ class MAVLinkClient:
             )
         except Exception as exc:
             print(f"[MAVLink] Connection failed: {exc}")
+            try:
+                if self._mav is not None:
+                    self._mav.close()
+            except Exception:
+                pass
+            self._mav = None
+            self._running = False
             return False
 
         self._running = True
@@ -941,34 +954,35 @@ class MAVLinkClient:
                 f"params=({p1:.2f},{p2:.2f},{p3:.2f},{p4:.2f},{p5:.2f},{p6:.2f},{p7:.2f})"
             )
             return True   # pretend ACK so callers proceed identically
-        ev = threading.Event()
-        with self._ack_lock:
-            self._ack_events[command] = ev
-            self._ack_results.pop(command, None)
-        try:
-            for attempt in range(retries):
-                ev.clear()
-                try:
-                    self._mav.mav.command_long_send(
-                        self._mav.target_system,
-                        self._mav.target_component,
-                        command, 0,
-                        p1, p2, p3, p4, p5, p6, p7,
-                    )
-                except Exception as exc:
-                    print(f"[MAVLink] send_command_with_ack send error: {exc}")
-                    return False
-                if ev.wait(timeout):
-                    result = self._ack_results.get(command, -1)
-                    if result == 0:
-                        return True
-                    print(f"[MAVLink] ACK rejected command={command} result={result}")
-                    return False
-                print(f"[MAVLink] ACK timeout command={command} "
-                      f"attempt={attempt + 1}/{retries}")
-        finally:
+        with self._command_lock:
+            ev = threading.Event()
             with self._ack_lock:
-                self._ack_events.pop(command, None)
+                self._ack_events[command] = ev
+                self._ack_results.pop(command, None)
+            try:
+                for attempt in range(retries):
+                    ev.clear()
+                    try:
+                        self._mav.mav.command_long_send(
+                            self._mav.target_system,
+                            self._mav.target_component,
+                            command, 0,
+                            p1, p2, p3, p4, p5, p6, p7,
+                        )
+                    except Exception as exc:
+                        print(f"[MAVLink] send_command_with_ack send error: {exc}")
+                        return False
+                    if ev.wait(timeout):
+                        result = self._ack_results.get(command, -1)
+                        if result == 0:
+                            return True
+                        print(f"[MAVLink] ACK rejected command={command} result={result}")
+                        return False
+                    print(f"[MAVLink] ACK timeout command={command} "
+                          f"attempt={attempt + 1}/{retries}")
+            finally:
+                with self._ack_lock:
+                    self._ack_events.pop(command, None)
         return False
 
     # ArduCopter custom-mode numbers used with MAV_CMD_DO_SET_MODE.

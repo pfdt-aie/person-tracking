@@ -237,6 +237,8 @@ class OperatorInputController:
                             print(f"[Target] Already locked to ID {new_id}")
                         else:
                             st.lock_id = new_id
+                            st.target_status = "locked_pending"
+                            st.target_warning = "waiting for next confirmed detection"
                             print(f"[Target] Locked onto ID {st.lock_id}. Type 'unlock' to release.")
                     elif len(parts) == 2 and parts[1] in ("on", "off"):
                         self._toggle_tracking(state=(parts[1] == "on"))
@@ -244,14 +246,20 @@ class OperatorInputController:
                         print("[Cmd] Usage: track <number>  |  track on|off")
                 elif line == "unlock":
                     st.lock_id = None
-                    print("[Target] Lock released — tracking largest person")
+                    st.target_status = "unlocked"
+                    st.target_warning = ""
+                    print("[Target] Lock released — preview keeps current person when possible")
                 elif line == "ids":
                     snap = dict(st.detected_ids)
                     if snap:
+                        if st.lock_id is not None:
+                            print(f"  Lock status: {st.target_status}"
+                                  + (f" — {st.target_warning}" if st.target_warning else ""))
                         for tid, d in snap.items():
                             marker = " ← LOCKED" if tid == st.lock_id else ""
                             print(f"  ID {tid:3d}  center=({d.cx:.0f},{d.cy:.0f})"
-                                  f"  conf={d.conf:.2f}{marker}")
+                                  f"  conf={d.conf:.2f}"
+                                  f"  lock_sim={d.appearance_sim_to_lock:.2f}{marker}")
                     else:
                         terminal.event("[IDs] No persons currently detected")
 

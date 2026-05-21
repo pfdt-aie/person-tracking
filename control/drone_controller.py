@@ -158,15 +158,28 @@ class DroneController:
     #  Public interface — called from tracker.py main loop at 10 Hz
     # ------------------------------------------------------------------
 
-    def notify_detection(self, detected: bool) -> None:
-        """Called every detection frame to update the tracking-loss timer."""
+    def notify_detection(self, detected: bool, *, confirm_body: bool = True) -> None:
+        """Record a detector sample and optionally refresh body-follow confidence.
+
+        The tracker can see a locked person even when gimbal attitude telemetry
+        or camera projection is unusable. In that case we still want FPS
+        accounting, but we must not keep the drone-body EKF prediction alive
+        from stale geometry.
+        """
         now = time.monotonic()
         with self._lock:
             self._fps_times.append(now)   # S3.5 — sample for FPS window
-            if detected:
+            if detected and confirm_body:
                 self._last_detection  = now
                 self._loiter_issued   = False
                 self._alert_issued    = False
+
+    def _confirm_body_measurement(self, now: float) -> None:
+        """Refresh body-follow confidence after an accepted EKF measurement."""
+        with self._lock:
+            self._last_detection = now
+            self._loiter_issued  = False
+            self._alert_issued   = False
 
     def is_body_confirmed(self) -> bool:
         """True if person was seen within body_confirm_window_s seconds.
@@ -422,7 +435,7 @@ class DroneController:
 
         # --- Update EKF with latest detection ---
         if target_info is not None and self._origin_set:
-            self._update_ekf_from_detection(target_info)
+            self._update_ekf_from_detection(target_info, now)
 
         # --- Tracking-loss failsafe ---
         with self._lock:
@@ -669,7 +682,7 @@ class DroneController:
 
         # Update EKF with latest detection (may use near-zero GPS in bench mode).
         if target_info is not None and self._origin_set:
-            self._update_ekf_from_detection(target_info)
+            self._update_ekf_from_detection(target_info, now)
 
         # Tracking-loss failsafe still applies — identical logic to real flight.
         with self._lock:
@@ -860,10 +873,20 @@ class DroneController:
     #  EKF update
     # ------------------------------------------------------------------
 
-    def _update_ekf_from_detection(self, target_info: TargetDetection) -> None:
-        """Project bounding box to GPS and update the EKF."""
+    def _update_ekf_from_detection(
+        self,
+        target_info: TargetDetection,
+        now: float | None = None,
+    ) -> bool:
+        """Project bounding box to GPS and update the EKF.
+
+        Returns True only when the projected measurement was accepted by the
+        EKF. Body-follow freshness is tied to this accepted measurement, not
+        merely to visual detection, so stale attitude or clipped boxes cannot
+        extend prediction indefinitely.
+        """
         if not self._origin_set:
-            return
+            return False
 
         lat, lon, alt_agl = self._mav.get_gps()
         roll, pitch, yaw  = self._mav.get_attitude()
@@ -883,10 +906,10 @@ class DroneController:
             # feet are below the frame the projection puts them closer than
             # they actually are, causing the drone to over-pursue.
             if y2 >= frame_h - 5:
-                return
+                return False
             # Also skip if any edge is clipped (person partly out of frame)
             if x1 <= 2 or x2 >= frame_w - 2 or y1 <= 2:
-                return
+                return False
 
             result = self._geo.project(
                 x1, y1, x2, y2, frame_w, frame_h,
@@ -895,17 +918,21 @@ class DroneController:
                 gimbal_pan_rad, gimbal_tilt_rad,
             )
             if result is None:
-                return
+                return False
 
             person_lat, person_lon = result
             meas_n, meas_e = self._ekf.gps_to_ned(
                 person_lat, person_lon,
                 self._origin_lat, self._origin_lon,
             )
-            self._ekf.update(meas_n, meas_e)
+            accepted = self._ekf.update(meas_n, meas_e)
+            if accepted:
+                self._confirm_body_measurement(now if now is not None else time.monotonic())
+            return accepted
         except Exception as e:
             import logging as _log
             _log.warning("[EKF] update error: %s", e)
+            return False
 
     def set_frame_size(self, w: int, h: int) -> None:
         """Called by tracker.py once the frame resolution is known."""

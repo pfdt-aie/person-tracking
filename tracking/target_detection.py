@@ -25,6 +25,8 @@ class TargetDetection:
         track_id: Persistent person ID assigned by PersonRegistry.
         is_fresh: True when this came from the current detector frame; False
                   when it is a short grace/coast target.
+        appearance_sim_to_lock: HSV-gallery similarity to the currently
+                  locked person before this frame updates the registry.
     """
     cx:       float
     cy:       float
@@ -35,6 +37,7 @@ class TargetDetection:
     conf:     float
     track_id: int
     is_fresh: bool = True
+    appearance_sim_to_lock: float = 0.0
 
     @property
     def bbox_w(self) -> float:

@@ -104,6 +104,24 @@ class PersonRegistry:
         }
         return pid
 
+    def similarity_to(self, pid: int | None, crop) -> float:
+        """Return appearance similarity between *crop* and an existing P-ID.
+
+        This is used by TargetSelector before the registry is updated for the
+        frame, so lock reacquisition can compare a candidate against the
+        previously-confirmed locked person instead of the candidate's freshly
+        written gallery entry.
+        """
+        if pid is None:
+            return 0.0
+        entry = self._gallery.get(pid)
+        if entry is None:
+            return 0.0
+        hist = self._compute_hist(crop)
+        if np.linalg.norm(hist) <= 0 or np.linalg.norm(entry['hist']) <= 0:
+            return 0.0
+        return float(np.dot(hist, entry['hist']))
+
     @staticmethod
     def _update_entry(entry: dict, hist: np.ndarray, now: float) -> None:
         entry['hist'] = 0.7 * entry['hist'] + 0.3 * hist
@@ -137,6 +155,15 @@ class PersonRegistry:
         """Normalised HSV color histogram (48 bins). Returns zeros on bad crop."""
         if crop is None or crop.size == 0 or crop.shape[0] < 4 or crop.shape[1] < 4:
             return np.zeros(48, dtype=np.float32)
+        h, w = crop.shape[:2]
+        # Focus on the central body area. Full-box histograms include floor,
+        # sky, and nearby people, which makes 2-3 person ground tests much
+        # more prone to ID swaps.
+        x1, x2 = int(w * 0.15), int(w * 0.85)
+        y1, y2 = int(h * 0.08), int(h * 0.92)
+        body = crop[y1:y2, x1:x2]
+        if body.shape[0] >= 4 and body.shape[1] >= 4:
+            crop = body
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
         hh = cv2.calcHist([hsv], [0], None, [16], [0, 180]).flatten()
         sh = cv2.calcHist([hsv], [1], None, [16], [0, 256]).flatten()

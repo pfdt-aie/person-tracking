@@ -54,6 +54,7 @@ class _FakeMav:
         self.armed     = armed
         self.takeoff_calls: list[float] = []
         self.guided_calls = 0
+        self.clear_override_calls = 0
 
     def is_landed(self):     return self.landed
     def get_mode(self):      return self.mode
@@ -68,6 +69,12 @@ class _FakeMav:
     def send_takeoff(self, alt):
         self.takeoff_calls.append(alt)
         return self.takeoff_ok
+
+    def clear_rc_override(self):
+        self.clear_override_calls += 1
+
+    def is_rc_override_active(self):
+        return False
 
 
 class _StubLog:
@@ -146,6 +153,54 @@ def test_refuses_when_preflight_fails():
     assert "preflight failing" in result["msg"]
     assert "items" in result
     assert t.mav.takeoff_calls == []
+
+
+def test_takeoff_bypasses_only_gps_home_when_armed(monkeypatch):
+    """GPS/HOME can be advisory after FCU arm; other outdoor_only labels cannot."""
+    _patch_flight_log(monkeypatch)
+    t = _tracker()
+    t.preflight.run = lambda: [
+        _PreflightItem("GPS fix OK", False, outdoor_only=True),
+        _PreflightItem("HOME position set", False, outdoor_only=True),
+    ]
+    result = t._handle_takeoff(7.0)
+    assert result["status"] == "ok"
+    assert t.mav.takeoff_calls == [7.0]
+
+
+def test_takeoff_does_not_bypass_param_loading_when_armed():
+    """Regression: params marked outdoor_only by mistake must still block takeoff."""
+    t = _tracker()
+    t.preflight.run = lambda: [
+        _PreflightItem("ArduPilot params correct", False, outdoor_only=True),
+    ]
+    result = t._handle_takeoff(7.0)
+    assert result["status"] == "error"
+    assert "ArduPilot params correct" in result["msg"]
+    assert t.mav.takeoff_calls == []
+
+
+def test_follow_bypasses_only_gps_home_when_armed(monkeypatch):
+    _patch_flight_log(monkeypatch)
+    t = _tracker()
+    t.preflight.run = lambda: [
+        _PreflightItem("GPS fix OK", False, outdoor_only=True),
+        _PreflightItem("HOME position set", False, outdoor_only=True),
+    ]
+    result = t._handle_follow(True)
+    assert result["status"] == "ok"
+    assert t._ts.drone_following is True
+
+
+def test_follow_does_not_bypass_param_loading_when_armed():
+    t = _tracker()
+    t.preflight.run = lambda: [
+        _PreflightItem("ArduPilot params correct", False, outdoor_only=True),
+    ]
+    result = t._handle_follow(True)
+    assert result["status"] == "error"
+    assert "ArduPilot params correct" in result["msg"]
+    assert t._ts.drone_following is False
 
 
 def test_refuses_when_fcu_not_armed():

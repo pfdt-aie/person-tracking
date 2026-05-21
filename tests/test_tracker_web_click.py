@@ -46,7 +46,12 @@ def _adapter_with_detection() -> tuple[WebControlAdapter, TrackerState]:
 
 def test_web_status_handles_target_detection_values():
     adapter, _ = _adapter_with_detection()
-    assert adapter.handle_click(None, None) == {'lock_id': None, 'ids': [7]}
+    assert adapter.handle_click(None, None) == {
+        'lock_id': None,
+        'ids': [7],
+        'target_status': 'unlocked',
+        'target_warning': '',
+    }
 
 
 def test_web_click_locks_target_detection_value():
