@@ -32,7 +32,6 @@ from control.search_patterns import (
     LissajousSearch,
     SectorScanSearch,
 )
-from detection.detector import Detector
 from gcs.stream_server import StreamServer
 from gcs.web_control_adapter import WebControlAdapter
 from gimbal.auto_zoom import AutoZoomController
@@ -87,6 +86,7 @@ class PersonGimbalTracker:
         )
 
         # --- Hardware ---
+        from detection.detector import Detector  # lazy: ultralytics not needed at import time
         self.detector = Detector(self._s.model_path, settings=self._s)
 
         print("[SIYI] Connecting to A8 mini...")

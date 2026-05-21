@@ -2,9 +2,35 @@
 import pathlib, sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
+import numpy as np
+
 from tracking.target_selector import TargetSelector
 from tracking.tracker_state import TrackerState
 from tracking.person_registry import PersonRegistry
+
+
+class _T:
+    """Minimal tensor-like mock: wraps a numpy array and exposes
+    .cpu()/.numpy()/.item() so TargetSelector can call the same
+    interface it uses on real PyTorch tensors."""
+
+    def __init__(self, data):
+        self._d = np.asarray(data, dtype=np.float32)
+
+    def __getitem__(self, i):
+        return _T(self._d[i])
+
+    def __len__(self):
+        return len(self._d)
+
+    def cpu(self):
+        return self
+
+    def numpy(self):
+        return self._d
+
+    def item(self):
+        return float(self._d.flat[0])
 
 
 def _make_state(**kw):
@@ -34,56 +60,40 @@ def test_empty_boxes_clears_detected_ids():
 
 def test_lock_id_none_returns_largest():
     """Without a lock, selector returns the detection with the largest bbox."""
-    import numpy as np
-    from tracking.target_detection import TargetDetection
-
-    class _Boxes:
-        id = None
-        xyxy = None
-        conf = None
-        def __len__(self): return 2
-
     frame = np.zeros((480, 640, 3), dtype=np.uint8)
 
-    import torch
-    boxes = _Boxes()
-    # Two boxes: small one and large one
-    boxes.xyxy = torch.tensor([[10, 10, 50, 50], [100, 100, 400, 400]], dtype=torch.float32)
-    boxes.conf = torch.tensor([0.9, 0.8])
-    boxes.id   = None  # no ByteTrack IDs → fallback to index
+    class _Boxes:
+        xyxy = _T([[10, 10, 50, 50], [100, 100, 400, 400]])
+        conf = _T([0.9, 0.8])
+        id   = None
+        def __len__(self): return 2
 
     class _Result:
-        pass
-
-    r = _Result()
-    r.boxes = boxes
-    r.orig_img = frame
+        boxes    = _Boxes()
+        orig_img = frame
 
     sel = TargetSelector(PersonRegistry())
     state = _make_state()
-    target = sel.select([r], state)
+    target = sel.select([_Result()], state)
 
     assert target is not None
     # Largest bbox wins — area(10,10→50,50)=1600 vs area(100,100→400,400)=90000
     assert target.x1 == 100.0
-    assert len(state.detected_ids) >= 1  # registry may merge identical crops
+    assert len(state.detected_ids) >= 1
 
 
 def test_lock_id_returns_locked_person():
     """With lock_id set, selector returns that detection or None."""
-    import numpy as np
-    import torch
-
     frame = np.zeros((480, 640, 3), dtype=np.uint8)
 
     class _Boxes:
-        xyxy = torch.tensor([[10, 10, 50, 50]], dtype=torch.float32)
-        conf = torch.tensor([0.9])
-        id   = torch.tensor([7], dtype=torch.float32)
+        xyxy = _T([[10, 10, 50, 50]])
+        conf = _T([0.9])
+        id   = _T([7])
         def __len__(self): return 1
 
     class _Result:
-        boxes = _Boxes()
+        boxes    = _Boxes()
         orig_img = frame
 
     sel = TargetSelector(PersonRegistry())
@@ -99,7 +109,7 @@ def test_lock_id_returns_locked_person():
     assert target is not None
     assert target.track_id == pid
 
-    # Lock on non-existent ID returns None
+    # Lock on non-existent ID returns None (and grace hasn't started yet for 9999)
     state.lock_id = 9999
     target = sel.select([_Result()], state)
     assert target is None
@@ -107,22 +117,19 @@ def test_lock_id_returns_locked_person():
 
 def test_locked_target_survives_brief_empty_result(monkeypatch):
     """A locked person should not be declared lost for one short detector dropout."""
-    import numpy as np
-    import torch
-
     now = [100.0]
     monkeypatch.setattr("tracking.target_selector.time.time", lambda: now[0])
 
     frame = np.zeros((480, 640, 3), dtype=np.uint8)
 
     class _Boxes:
-        xyxy = torch.tensor([[100, 100, 200, 300]], dtype=torch.float32)
-        conf = torch.tensor([0.9])
-        id = torch.tensor([7], dtype=torch.float32)
+        xyxy = _T([[100, 100, 200, 300]])
+        conf = _T([0.9])
+        id   = _T([7])
         def __len__(self): return 1
 
     class _Result:
-        boxes = _Boxes()
+        boxes    = _Boxes()
         orig_img = frame
 
     sel = TargetSelector(PersonRegistry(), lock_grace_s=0.5)
@@ -141,22 +148,19 @@ def test_locked_target_survives_brief_empty_result(monkeypatch):
 
 
 def test_locked_target_grace_expires(monkeypatch):
-    import numpy as np
-    import torch
-
     now = [100.0]
     monkeypatch.setattr("tracking.target_selector.time.time", lambda: now[0])
 
     frame = np.zeros((480, 640, 3), dtype=np.uint8)
 
     class _Boxes:
-        xyxy = torch.tensor([[100, 100, 200, 300]], dtype=torch.float32)
-        conf = torch.tensor([0.9])
-        id = torch.tensor([7], dtype=torch.float32)
+        xyxy = _T([[100, 100, 200, 300]])
+        conf = _T([0.9])
+        id   = _T([7])
         def __len__(self): return 1
 
     class _Result:
-        boxes = _Boxes()
+        boxes    = _Boxes()
         orig_img = frame
 
     sel = TargetSelector(PersonRegistry(), lock_grace_s=0.5)
@@ -172,9 +176,6 @@ def test_locked_target_grace_expires(monkeypatch):
 
 
 def test_locked_target_can_reacquire_nearby_new_id(monkeypatch):
-    import numpy as np
-    import torch
-
     now = [100.0]
     monkeypatch.setattr("tracking.target_selector.time.time", lambda: now[0])
 
@@ -183,23 +184,23 @@ def test_locked_target_can_reacquire_nearby_new_id(monkeypatch):
     frame2[105:305, 108:208] = (0, 0, 255)
 
     class _Boxes1:
-        xyxy = torch.tensor([[100, 100, 200, 300]], dtype=torch.float32)
-        conf = torch.tensor([0.9])
-        id = torch.tensor([7], dtype=torch.float32)
+        xyxy = _T([[100, 100, 200, 300]])
+        conf = _T([0.9])
+        id   = _T([7])
         def __len__(self): return 1
 
     class _Boxes2:
-        xyxy = torch.tensor([[108, 105, 208, 305]], dtype=torch.float32)
-        conf = torch.tensor([0.88])
-        id = torch.tensor([8], dtype=torch.float32)
+        xyxy = _T([[108, 105, 208, 305]])
+        conf = _T([0.88])
+        id   = _T([8])
         def __len__(self): return 1
 
     class _Result1:
-        boxes = _Boxes1()
+        boxes    = _Boxes1()
         orig_img = frame1
 
     class _Result2:
-        boxes = _Boxes2()
+        boxes    = _Boxes2()
         orig_img = frame2
 
     sel = TargetSelector(PersonRegistry(), lock_grace_s=0.5, reacquire_center_ratio=0.25)
@@ -217,9 +218,6 @@ def test_locked_target_can_reacquire_nearby_new_id(monkeypatch):
 
 
 def test_locked_target_rejects_far_new_id(monkeypatch):
-    import numpy as np
-    import torch
-
     now = [100.0]
     monkeypatch.setattr("tracking.target_selector.time.time", lambda: now[0])
 
@@ -228,23 +226,23 @@ def test_locked_target_rejects_far_new_id(monkeypatch):
     frame2[100:300, 470:570] = (0, 0, 255)
 
     class _Boxes1:
-        xyxy = torch.tensor([[100, 100, 200, 300]], dtype=torch.float32)
-        conf = torch.tensor([0.9])
-        id = torch.tensor([7], dtype=torch.float32)
+        xyxy = _T([[100, 100, 200, 300]])
+        conf = _T([0.9])
+        id   = _T([7])
         def __len__(self): return 1
 
     class _Boxes2:
-        xyxy = torch.tensor([[470, 100, 570, 300]], dtype=torch.float32)
-        conf = torch.tensor([0.88])
-        id = torch.tensor([8], dtype=torch.float32)
+        xyxy = _T([[470, 100, 570, 300]])
+        conf = _T([0.88])
+        id   = _T([8])
         def __len__(self): return 1
 
     class _Result1:
-        boxes = _Boxes1()
+        boxes    = _Boxes1()
         orig_img = frame1
 
     class _Result2:
-        boxes = _Boxes2()
+        boxes    = _Boxes2()
         orig_img = frame2
 
     sel = TargetSelector(PersonRegistry(), lock_grace_s=0.5, reacquire_center_ratio=0.25)
@@ -263,9 +261,6 @@ def test_locked_target_rejects_far_new_id(monkeypatch):
 
 
 def test_locked_target_rejects_no_overlap_outside_strict_center(monkeypatch):
-    import numpy as np
-    import torch
-
     now = [100.0]
     monkeypatch.setattr("tracking.target_selector.time.time", lambda: now[0])
 
@@ -274,23 +269,23 @@ def test_locked_target_rejects_no_overlap_outside_strict_center(monkeypatch):
     frame2[100:300, 220:320] = (0, 0, 255)
 
     class _Boxes1:
-        xyxy = torch.tensor([[100, 100, 200, 300]], dtype=torch.float32)
-        conf = torch.tensor([0.9])
-        id = torch.tensor([7], dtype=torch.float32)
+        xyxy = _T([[100, 100, 200, 300]])
+        conf = _T([0.9])
+        id   = _T([7])
         def __len__(self): return 1
 
     class _Boxes2:
-        xyxy = torch.tensor([[220, 100, 320, 300]], dtype=torch.float32)
-        conf = torch.tensor([0.88])
-        id = torch.tensor([8], dtype=torch.float32)
+        xyxy = _T([[220, 100, 320, 300]])
+        conf = _T([0.88])
+        id   = _T([8])
         def __len__(self): return 1
 
     class _Result1:
-        boxes = _Boxes1()
+        boxes    = _Boxes1()
         orig_img = frame1
 
     class _Result2:
-        boxes = _Boxes2()
+        boxes    = _Boxes2()
         orig_img = frame2
 
     sel = TargetSelector(
@@ -315,26 +310,23 @@ def test_locked_target_rejects_no_overlap_outside_strict_center(monkeypatch):
 
 
 def test_detect_only_fallback_reidentifies_by_appearance_not_index():
-    import numpy as np
-    import torch
-
     frame = np.zeros((480, 640, 3), dtype=np.uint8)
     frame[100:300, 100:200] = (0, 0, 255)
 
     class _Boxes:
-        xyxy = torch.tensor([[100, 100, 200, 300]], dtype=torch.float32)
-        conf = torch.tensor([0.9])
-        id = None
+        xyxy = _T([[100, 100, 200, 300]])
+        conf = _T([0.9])
+        id   = None
         def __len__(self): return 1
 
     class _Result:
-        boxes = _Boxes()
+        boxes    = _Boxes()
         orig_img = frame
 
     sel = TargetSelector(PersonRegistry())
     state = _make_state()
 
-    first = sel.select([_Result()], state)
+    first  = sel.select([_Result()], state)
     second = sel.select([_Result()], state)
 
     assert first is not None
@@ -343,24 +335,18 @@ def test_detect_only_fallback_reidentifies_by_appearance_not_index():
 
 
 def test_same_frame_similar_people_do_not_collapse_to_one_pid():
-    import numpy as np
-    import torch
-
     frame = np.zeros((480, 640, 3), dtype=np.uint8)
     frame[100:300, 100:200] = (0, 0, 255)
     frame[100:300, 300:400] = (0, 0, 255)
 
     class _Boxes:
-        xyxy = torch.tensor(
-            [[100, 100, 200, 300], [300, 100, 400, 300]],
-            dtype=torch.float32,
-        )
-        conf = torch.tensor([0.9, 0.88])
-        id = torch.tensor([7, 8], dtype=torch.float32)
+        xyxy = _T([[100, 100, 200, 300], [300, 100, 400, 300]])
+        conf = _T([0.9, 0.88])
+        id   = _T([7, 8])
         def __len__(self): return 2
 
     class _Result:
-        boxes = _Boxes()
+        boxes    = _Boxes()
         orig_img = frame
 
     sel = TargetSelector(PersonRegistry())

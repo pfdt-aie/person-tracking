@@ -34,12 +34,6 @@ import pathlib
 import sys
 from datetime import datetime
 
-# Preflight: verify declared dependencies are installed in this interpreter
-# BEFORE importing any third-party package. Fails fast with a clear fix
-# command instead of a deep stack trace mid-startup.
-from utils.preflight import enforce_dependencies
-enforce_dependencies(pathlib.Path(__file__).resolve().parent / "requirements.txt")
-
 # Pin Ultralytics settings dir before any ultralytics import so it lands
 # in a predictable location regardless of systemd user or read-only home.
 # Prefer ~/.cache/ultralytics (persistent) over /tmp/ultralytics (tmpfs,
@@ -58,8 +52,6 @@ def _resolve_ul_dir() -> pathlib.Path:
         return tmp
 _ul_dir = _resolve_ul_dir()
 os.environ.setdefault("YOLO_CONFIG_DIR", str(_ul_dir))
-
-import torch
 
 import config as cfg
 
@@ -139,6 +131,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def print_banner(args: argparse.Namespace) -> None:
+    import torch
     gpu    = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A"
     cuda   = "YES" if torch.cuda.is_available() else "NO"
     now    = datetime.now().strftime('%Y-%m-%d  %H:%M:%S')
@@ -177,6 +170,10 @@ def print_banner(args: argparse.Namespace) -> None:
 
 
 def main() -> int:
+    # Verify declared dependencies are installed before touching third-party code.
+    from utils.preflight import enforce_dependencies
+    enforce_dependencies(pathlib.Path(__file__).resolve().parent / "requirements.txt")
+
     # Install session log before any print() so banner + all output go to file.
     from utils.logger import setup_log, teardown_log
     from utils.flight_log import init_flight_log, close_flight_log
