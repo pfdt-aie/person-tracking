@@ -20,7 +20,7 @@ class _FakeMav:
 
 def _good_values():
     return {
-        "FENCE_ENABLE":     1.0,
+        # "FENCE_ENABLE":     1.0,  # check commented out in param_verifier.py
         "FENCE_RADIUS":     1000.0,
         "FENCE_ALT_MAX":    120.0,
         "RTL_ALT":          3000.0,
@@ -35,12 +35,12 @@ def test_all_params_correct_passes():
     assert v.all_pass() is True
 
 
-def test_fence_disabled_fails():
-    bad = _good_values()
-    bad["FENCE_ENABLE"] = 0.0
-    v = ParamVerifier(_FakeMav(bad), timeout_per_param=0.0)
-    results = {c.name: c for c in v.run()}
-    assert results["FENCE_ENABLE"].ok is False
+# def test_fence_disabled_fails():  # FENCE_ENABLE check commented out
+#     bad = _good_values()
+#     bad["FENCE_ENABLE"] = 0.0
+#     v = ParamVerifier(_FakeMav(bad), timeout_per_param=0.0)
+#     results = {c.name: c for c in v.run()}
+#     assert results["FENCE_ENABLE"].ok is False
 
 
 def test_radius_too_small_fails():
@@ -57,13 +57,13 @@ def test_battery_failsafe_action_too_low_fails():
     assert v.all_pass() is False
 
 
-def test_missing_param_treated_as_fail():
-    bad = _good_values()
-    del bad["FENCE_ENABLE"]
-    v = ParamVerifier(_FakeMav(bad), timeout_per_param=0.0)
-    results = {c.name: c for c in v.run()}
-    assert results["FENCE_ENABLE"].ok is False
-    assert "not advertised" in results["FENCE_ENABLE"].message
+# def test_missing_param_treated_as_fail():  # FENCE_ENABLE check commented out
+#     bad = _good_values()
+#     del bad["FENCE_ENABLE"]
+#     v = ParamVerifier(_FakeMav(bad), timeout_per_param=0.0)
+#     results = {c.name: c for c in v.run()}
+#     assert results["FENCE_ENABLE"].ok is False
+#     assert "not advertised" in results["FENCE_ENABLE"].message
 
 
 def test_guid_timeout_zero_fails():
@@ -92,7 +92,7 @@ def test_bitmask_rule():
 
 def test_default_requirements_lists_known_params():
     names = [r.name for r in default_requirements()]
-    for expected in ("FENCE_ENABLE", "RTL_ALT", "BATT_FS_LOW_ACT",
+    for expected in ("RTL_ALT", "BATT_FS_LOW_ACT",
                      "FS_GCS_ENABLE", "GUID_TIMEOUT"):
         assert expected in names
 

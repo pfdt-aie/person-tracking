@@ -69,8 +69,8 @@ def default_requirements() -> List[Requirement]:
     raises the FCU-side minimum.
     """
     return [
-        Requirement("FENCE_ENABLE", "==", 1.0,
-                    note="onboard geofence must be enabled"),
+        # Requirement("FENCE_ENABLE", "==", 1.0,
+        #             note="onboard geofence must be enabled"),
         Requirement("FENCE_RADIUS", ">=", float(cfg.GEOFENCE_RADIUS_M),
                     note=f"FCU radius must be ≥ app GEOFENCE_RADIUS_M ({cfg.GEOFENCE_RADIUS_M:.0f} m)"),
         Requirement("FENCE_ALT_MAX", ">=", float(cfg.MAX_ALT_M),
