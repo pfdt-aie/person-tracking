@@ -44,6 +44,7 @@ _HELP: list[tuple[str, str]] = [
     ("mode auto|manual",           "set tracker mode"),
     ("mode brake|land|rtl",        "request FCU safety mode (--drone required)"),
     ("follow",                     "enable drone-body following after preflight (--drone)"),
+    ("follow override",            "force-enable following — skips preflight (operator accepts risk)"),
     ("unfollow",                   "stop drone-body following (tracker only; FCU mode unchanged)"),
     ("takeoff [alt]",              "command FCU takeoff to alt m AGL (default 7) — --drone, FCU armed + landed"),
     ("estop",                      "BRAKE; press again within 3s for LAND"),
@@ -209,7 +210,9 @@ class OperatorInputController:
 
                 # --- Drone-body follow toggle + software E-STOP ---
                 elif line == "follow":
-                    self._handle_stdin_follow(True)
+                    self._handle_stdin_follow(True, override=False)
+                elif line == "follow override":
+                    self._handle_stdin_follow(True, override=True)
                 elif line == "unfollow":
                     self._handle_stdin_follow(False)
                 elif line == "takeoff" or line.startswith("takeoff "):
@@ -351,7 +354,7 @@ class OperatorInputController:
         else:
             print(f"[Cmd] {label} failed: {msg}")
 
-    def _handle_stdin_follow(self, on: bool) -> None:
+    def _handle_stdin_follow(self, on: bool, override: bool = False) -> None:
         """Stdin wrapper around the handle_follow callback.
 
         Mirrors what the web UI's Start/Stop-Following buttons do but
@@ -371,7 +374,7 @@ class OperatorInputController:
                   "(launched without --drone?)")
             return
         try:
-            result = cb(on) or {}
+            result = cb(on, override=override) if on else cb(on)
         except Exception as exc:
             print(f"[Cmd] {verb} error: {exc}")
             return

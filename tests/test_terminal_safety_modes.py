@@ -305,7 +305,7 @@ def test_follow_invokes_handler_with_true_and_prints_following(capsys):
     cb = MagicMock(return_value={"status": "ok", "following": True, "msg": "ready"})
     c = _make_op(handle_follow=cb)
     c._handle_stdin_follow(True)
-    cb.assert_called_once_with(True)
+    cb.assert_called_once_with(True, override=False)
     assert "FOLLOWING" in capsys.readouterr().out
 
 
@@ -473,7 +473,7 @@ def test_stdin_follow_routes_to_handler(monkeypatch):
     cb = MagicMock(return_value={"status": "ok", "following": True, "msg": ""})
     c = _make_op(handle_follow=cb)
     _drive_stdin(monkeypatch, c, ["follow"])
-    cb.assert_called_with(True)
+    cb.assert_called_with(True, override=False)
 
 
 def test_stdin_unfollow_routes_to_handler(monkeypatch):

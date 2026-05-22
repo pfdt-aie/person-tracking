@@ -453,7 +453,7 @@ class PersonGimbalTracker:
         """Return the live preflight checklist as a list of dicts."""
         return [item.to_dict() for item in self.preflight.run()]
 
-    def _handle_follow(self, on) -> dict:
+    def _handle_follow(self, on, override: bool = False) -> dict:
         """Enable or stop drone-body following of the locked person.
 
         This is the tracker-side authority gate — distinct from FCU arming
@@ -462,12 +462,13 @@ class PersonGimbalTracker:
         operators in earlier field tests.
 
         Args:
-            on: True to start following, False to stop, None to query current state.
+            on:       True to start following, False to stop, None to query.
+            override: If True, skip the preflight gate (operator accepts risk).
 
         Returns:
             {"following": bool, "status": "ok"|"error", "msg": str, "items": [...]}.
             Refuses to start following if any preflight item is failing or
-            --drone was not specified at launch.
+            --drone was not specified at launch (unless override=True).
         """
         if on is None:
             return {"following": bool(self._ts.drone_following), "status": "ok", "msg": ""}
@@ -523,7 +524,7 @@ class PersonGimbalTracker:
             c for c in items
             if not c.ok and not (fcu_armed and _allow_armed_outdoor_bypass(c))
         ]
-        if bad:
+        if bad and not override:
             failing = ", ".join(c.name for c in bad)
             return {"following": False, "status": "error",
                     "msg": f"preflight failing: {failing}",
@@ -533,16 +534,22 @@ class PersonGimbalTracker:
         # so the controller can resume issuing commands.
         self.mav.clear_rc_override()
         self._ts.drone_following = True
-        skipped = [
-            c for c in items
-            if not c.ok and fcu_armed and _allow_armed_outdoor_bypass(c)
-        ]
-        if skipped:
-            names = ", ".join(c.name for c in skipped)
-            print(f"[Follow] Drone-body following ENABLED — GPS/HOME bypassed (FCU armed): {names}")
+        if override and bad:
+            overridden_names = ", ".join(c.name for c in bad)
+            print(f"[Follow] ⚠ OPERATOR OVERRIDE — preflight bypassed: {overridden_names}")
+            print("[Follow] Drone-body following ENABLED — override active")
+            safe_event("follow", checks_passed=len(items) - len(bad), override=True)
         else:
-            print("[Follow] Drone-body following ENABLED — preflight all green")
-        safe_event("follow", checks_passed=len(items) - len(skipped))
+            skipped = [
+                c for c in items
+                if not c.ok and fcu_armed and _allow_armed_outdoor_bypass(c)
+            ]
+            if skipped:
+                names = ", ".join(c.name for c in skipped)
+                print(f"[Follow] Drone-body following ENABLED — GPS/HOME bypassed (FCU armed): {names}")
+            else:
+                print("[Follow] Drone-body following ENABLED — preflight all green")
+            safe_event("follow", checks_passed=len(items) - len(skipped))
         if self._ts.lock_id is None:
             print("[Follow] Hint: no target locked — drone will hover until you type "
                   "'ids' then 'track <id>'")
