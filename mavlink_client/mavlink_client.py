@@ -47,8 +47,16 @@ except ImportError:
 
 
 # MAVLink type_mask constants for SET_POSITION_TARGET_LOCAL_NED
-_MASK_POS_VEL   = 3520   # 0b0000_1101_1100_0000 — use position + velocity feedforward
-_MASK_VEL_ONLY  = 3527   # 0b0000_1101_1100_0111 — use velocity only
+# Bit = 1 → IGNORE that field.  Bit = 0 → USE that field.  Bit 9 = FORCE flag (not ignore).
+# Layout: [11]yaw_rate [10]yaw [9]force [8]az [7]ay [6]ax [5]vz [4]vy [3]vx [2]z [1]y [0]x
+#
+#                           11 10  9  8  7  6  5  4  3  2  1  0
+#                           yr  y  F az ay ax vz vy vx  z  y  x   what ArduPilot uses
+_MASK_POS_ONLY    = 3576   # 1  1  0  1  1  1  1  1  1  0  0  0   position only
+_MASK_POS_YAW     = 2552   # 1  0  0  1  1  1  1  1  1  0  0  0   position + absolute yaw
+_MASK_POS_VEL     = 3520   # 1  1  0  1  1  1  0  0  0  0  0  0   pos + vel feedforward
+_MASK_POS_VEL_YAW = 2496   # 1  0  0  1  1  1  0  0  0  0  0  0   pos + vel + yaw
+_MASK_VEL_ONLY    = 3527   # 1  1  0  1  1  1  0  0  0  1  1  1   velocity only
 
 # MAV_SYS_STATUS_SENSOR bitmask: gyro(1) + accel(2) + mag(4) + baro(8)
 # GPS is checked independently via is_gps_ok() / GPS_RAW_INT.fix_type
@@ -1102,24 +1110,66 @@ class MAVLinkClient:
         self,
         pN: float, pE: float, pD: float,
         vN: float, vE: float, vD: float,
+        yaw_rad: float | None = None,
     ) -> None:
         """Send position target + velocity feedforward in Earth NED frame.
 
-        This is the preferred tracking command: ArduPilot uses the position
-        as the convergence target and the velocity as feedforward so it
-        anticipates motion rather than always lagging behind.
+        ArduPilot guided_set_destination_posvel semantics
+        (SET_POSITION_TARGET_LOCAL_NED):
+          pN/pE/pD — absolute target position in ArduPilot LOCAL_NED
+                     (metres from HOME origin; pD negative = above HOME).
+          vN/vE/vD — velocity feedforward: how fast the TARGET POSITION is
+                     expected to move, NOT the drone's commanded velocity.
+                     ArduPilot shifts pos_target by vel*dt each 400 Hz tick
+                     between our 10 Hz updates; its own position controller
+                     closes the residual error.
+          yaw_rad  — optional absolute heading setpoint in NED radians
+                     (0 = North, π/2 = East).  When provided, the drone yaws
+                     to face this direction while tracking the position target.
+                     Pass bearing_to_person so the drone always faces the subject
+                     and can follow lateral motion without crab-walking.
+                     When None, _MASK_POS_VEL is used (yaw ignored — old behaviour).
+                     When set, _MASK_POS_VEL_YAW is used; yaw_rate remains ignored
+                     so only the absolute heading is controlled, not the rate.
 
-        Args:
-            pN, pE, pD: Target NED position (m from EKF origin).
-            vN, vE, vD: Feedforward velocity (m/s).
+        IMPORTANT: vN/vE must be the target's expected velocity (person velocity
+        only).  Do NOT include a P-controller error term — ArduPilot's position
+        loop already handles convergence; adding kp*error doubles the gain and
+        causes overshoot.
 
-        Safety: velocity components are clamped before sending.
+        pD sign: NED Down-positive.  pD = -7.0 → 7 m above HOME. ✓
+
+        Safety: velocity is clamped; position is not (geofence checked upstream).
         """
         vN, vE, vD = self._safety.check_velocity(vN, vE, vD)
-        # pD is DOWN; apply altitude floor on pD (more negative = higher)
-        # alt_agl = home_alt_rel - pD (approx); clamp pD to prevent going below floor
-        # We just clamp the velocity; ArduPilot's FENCE_ALT_MIN is the hardware stop.
-        self._send_position_target(pN, pE, pD, vN, vE, vD, _MASK_POS_VEL)
+        if yaw_rad is None:
+            self._send_position_target(pN, pE, pD, vN, vE, vD, _MASK_POS_VEL)
+        else:
+            self._send_position_target(pN, pE, pD, vN, vE, vD,
+                                       _MASK_POS_VEL_YAW, yaw=float(yaw_rad))
+
+    def send_position_ned(
+        self,
+        pN: float, pE: float, pD: float,
+        yaw_rad: float | None = None,
+    ) -> None:
+        """Send a position-only target in ArduPilot LOCAL_NED frame.
+
+        With yaw_rad=None this uses _MASK_POS_ONLY: position is active while
+        velocity, acceleration, yaw, and yaw-rate are ignored.  ArduPilot's own
+        trajectory planner decides how fast to move there, which is safer than
+        pos+vel when EKF velocity estimates are noisy.
+
+        Args:
+            pN, pE: Target North/East in LOCAL_NED metres from HOME origin.
+            pD:     Target Down in LOCAL_NED (negative = above HOME; -7.0 = 7m AGL).
+            yaw_rad: Optional absolute heading in NED radians (0=North, π/2=East).
+                     Normal person-follow mode leaves this as None so yaw is
+                     ignored and the FCU cannot perform a mask-induced turn.
+        """
+        mask = _MASK_POS_YAW if yaw_rad is not None else _MASK_POS_ONLY
+        yaw  = float(yaw_rad) if yaw_rad is not None else 0.0
+        self._send_position_target(pN, pE, pD, 0.0, 0.0, 0.0, mask, yaw=yaw)
 
     def _send_position_target(
         self,

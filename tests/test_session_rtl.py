@@ -50,6 +50,7 @@ class _FakeMav:
     def send_zero_velocity(self):      self.last_velocity = (0, 0, 0)
     def send_velocity_ned(self, *a):   self.last_velocity = a
     def send_position_velocity_ned(self, *a): self.last_velocity = a
+    def send_position_ned(self, *a):   self.last_velocity = a
     def get_position_ned(self):        return (0.0, 0.0, -30.0)
     def get_velocity_ned(self):        return (0.0, 0.0, 0.0)
     def get_attitude(self):            return (0.0, 0.0, 0.0)

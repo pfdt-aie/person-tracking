@@ -9,12 +9,10 @@ Drone movement is triggered when:
   - Gimbal pan > GIMBAL_PAN_SOFT_DEG  (person drifting off-centre in yaw)
   - Person GPS is known (EKF valid) and standoff distance error > 1 m
 
-Velocity pipeline (per frame at 10 Hz):
-  EKF person position → proportional error + feedforward velocity
-      → EMA low-pass filter (reduce noise)
-      → jerk limiter (reduce mechanical stress)
-      → safety.check_velocity() (hard speed cap)
-      → mavlink.send_position_velocity_ned()
+Position pipeline (per frame at 10 Hz):
+  EKF person position → standoff target
+      → position-target slew limiter (remove camera/EKF jumps)
+      → mavlink.send_position_ned() with velocity and yaw ignored
 
 Failsafe hierarchy (tracking loss):
   0–2s   Use EKF prediction (maintain motion, gimbal searching)
@@ -120,6 +118,14 @@ class DroneController:
         self._vel_above_t: float = -1.0
         self._bearing_rad: float = 0.0
         self._bearing_init: bool = False
+
+        # Position-target slew limiter: prevents EKF position jumps (wrong
+        # re-ID, projection glitch) from instantly teleporting the standoff
+        # target and causing the drone to lurch.  The slewed target moves at
+        # most MAX_TRACKING_SPEED_MS per second toward the true target.
+        self._slew_tN:   float = 0.0
+        self._slew_tE:   float = 0.0
+        self._slew_init: bool  = False
 
         # S3.3 — session-time RTL. Timer starts on first armed-enable;
         # resets when the drone is disarmed (drone_tracking_enabled=False).
@@ -275,12 +281,12 @@ class DroneController:
                 self._session_rtl_issued = True
             return 0.0
 
-        # Advance EKF state estimate every tick so velocity feedforward stays fresh
-        # between detection updates (predict-only steps incur no measurement cost).
+        # Advance EKF state estimate every tick so the position target stays
+        # current between detection updates (predict-only steps are cheap).
         self._ekf.predict(dt)
 
-        # Ground-test mode: bypass all flight-critical gates and run the full
-        # velocity pipeline. MAVLink TX is already suppressed by the client;
+        # Ground-test mode: bypass all flight-critical gates and run the same
+        # position-target pipeline. MAVLink TX is already suppressed by the client;
         # commands are logged as [DRY-RUN] so operators can verify the pipeline
         # on a bench without GPS, arming, or RC.
         if self._mav.is_ground_test():
@@ -564,44 +570,29 @@ class DroneController:
         target_de = de - math.sin(bearing) * self._s.follow_standoff_m
         target_dist = math.hypot(target_dn, target_de)
 
-        # Velocity feedforward — add EKF person velocity only when the person
-        # has been moving continuously for at least BEARING_LATCH_S seconds.
-        # This reuses the _vel_above_t latch already maintained by _update_bearing
-        # (called above). At hover the latch is inactive → zero feedforward → no
-        # GPS-velocity-noise-driven drift. When walking the latch fires after 1s
-        # of sustained motion → feedforward kicks in for anticipatory following.
-        # Cap is still applied to guard against transient EKF position-jump spikes.
-        ff_latch_active = (
-            self._vel_above_t >= 0.0
-            and (now - self._vel_above_t) >= self._s.bearing_latch_s
+        # --- Standoff target in LOCAL_NED (frame-safe: drone_ned + GPS offset) ---
+        drone_ned_n, drone_ned_e, _ = self._mav.get_position_ned()
+        abs_target_n = drone_ned_n + target_dn
+        abs_target_e = drone_ned_e + target_de
+        abs_target_d = -(self._s.follow_altitude_m)   # NED D: negative = above HOME
+
+        # Slew-limit the target so an EKF position jump (bad detection, re-ID
+        # swap) cannot teleport the standoff point and cause a lurch.
+        slew_n, slew_e = self._slew_position_target(
+            abs_target_n, abs_target_e, dt,
+            seed_n=drone_ned_n, seed_e=drone_ned_e,
         )
-        if ff_latch_active:
-            ff_cap = self._s.max_tracking_speed_ms * 0.5
-            vN_ff = max(-ff_cap, min(ff_cap, vN_p))
-            vE_ff = max(-ff_cap, min(ff_cap, vE_p))
-        else:
-            vN_ff = vE_ff = 0.0
 
-        if target_dist < self._s.drone_follow_deadband_m:
-            vN, vE = self._apply_smoother(0.0, 0.0, dt)
-        else:
-            raw_vn = self._s.drone_kp * target_dn + vN_ff
-            raw_ve = self._s.drone_kp * target_de + vE_ff
-            vN, vE = self._apply_smoother(raw_vn, raw_ve, dt)
-
-        # Standoff target position — reused by geofence and HOME keep-out checks.
+        # Standoff target in EKF-NED (for geofence / HOME keep-out checks only)
         tkN = pN_p - math.cos(bearing) * self._s.follow_standoff_m
         tkE = pE_p - math.sin(bearing) * self._s.follow_standoff_m
 
-        # S2.1 — Geofence: block commands that would drive the standoff target
-        # outside the configured boundary.  _target_within_geofence returns True
-        # when the target position is legal; False blocks the velocity command.
+        # S2.1 — Geofence check on the true (un-slewed) standoff target.
         if not self._target_within_geofence(tkN, tkE, alt_agl):
             self._mav.send_zero_velocity()
             return 0.0
 
-        # S2.2 — HOME keep-out: only meaningful when actual HOME_POSITION
-        # was received (not GPS fallback where origin = drone hover spot).
+        # S2.2 — HOME keep-out.
         if self._mav.is_home_set():
             if not self._safety.check_home_keepout(tkN, tkE):
                 self._mav.send_zero_velocity()
@@ -610,36 +601,40 @@ class DroneController:
         # --- Drone yaw correction for gimbal pan ---
         pan_correction_rads = self._compute_yaw_correction(gimbal_pan_deg)
 
-        # Cap smoother internal state to MAX_TRACKING_SPEED_MS so it cannot
-        # wind up to huge values when the EKF has a wrong position estimate.
-        # Without this cap, _prev_vn grows at 2 m/s²/tick and the drone would
-        # take minutes to decelerate after EKF is corrected.
-        max_v = self._s.max_tracking_speed_ms
-        horiz = math.hypot(vN, vE)
-        if horiz > max_v:
-            scale = max_v / horiz
-            vN *= scale
-            vE *= scale
-            # Also clamp internal smoother state so the jerk limiter doesn't
-            # need to wind down from an enormous value.
-            self._prev_vn = max(-max_v, min(max_v, self._prev_vn))
-            self._prev_ve = max(-max_v, min(max_v, self._prev_ve))
-            self._ema_vn  = max(-max_v, min(max_v, self._ema_vn))
-            self._ema_ve  = max(-max_v, min(max_v, self._ema_ve))
-
-        # Confirmation log every 3 s.
         if now - getattr(self, '_follow_log_t', 0.0) >= 3.0:
             self._follow_log_t = now
-            print(f"[Drone] Following ✓  vel=({vN:.2f},{vE:.2f}) m/s  "
-                  f"person={sep:.1f}m  to_target={target_dist:.1f}m  "
+            slew_lag = math.hypot(slew_n - abs_target_n, slew_e - abs_target_e)
+            print(f"[Drone] Following ✓  person={sep:.1f}m  "
+                  f"to_target={target_dist:.1f}m  "
+                  f"slew_lag={slew_lag:.1f}m  "
+                  f"bearing={math.degrees(bearing):.0f}°  "
                   f"alt={alt_agl:.1f}m")
 
-        # Send velocity only — no absolute yaw target.
-        # Absolute yaw (atan2 of GPS direction) is unreliable at close range:
-        # 1m GPS noise at 2m distance = 30° error → drone spins.
-        # Drone yaw is handled by _compute_yaw_correction (gimbal-pan-based)
-        # which gently rotates the drone when gimbal pan exceeds 60°.
-        self._mav.send_velocity_ned(vN, vE, 0.0)
+        # Strict position-only command (_MASK_POS_ONLY = 3576 = 0x0DF8):
+        #   position = slew-limited standoff target in LOCAL_NED
+        #   velocity = IGNORED  (ArduPilot plans trajectory internally)
+        #   yaw      = IGNORED  (prevents mask-induced 180° turns)
+        #
+        # WHY position-only (no velocity feedforward):
+        #   Velocity feedforward injects EKF velocity estimates into ArduPilot.
+        #   When the EKF velocity is stale (last update was 'forward'), the
+        #   drone keeps going straight even after the position target has moved
+        #   laterally.  Removing velocity lets ArduPilot's own WPNAV controller
+        #   decide how to get there — it reads position error every 400 Hz tick
+        #   and generates the correct lateral velocity itself.
+        #
+        # WHY slew limiter:
+        #   Without slew, a single bad detection or re-ID swap can jump the
+        #   standoff 10 m in one tick.  ArduPilot would immediately accelerate
+        #   toward it.  The slew cap (MAX_TRACKING_SPEED_MS) means the target
+        #   moves no faster than the drone can actually follow.
+        #
+        # WHY yaw ignored for today's fix:
+        #   The reported 180° turn is exactly what happens when yaw/yaw-rate
+        #   are accidentally active in SET_POSITION_TARGET_LOCAL_NED.  Body yaw
+        #   is still handled gently by _compute_yaw_correction() from gimbal pan;
+        #   the position target itself must not include an absolute yaw setpoint.
+        self._mav.send_position_ned(slew_n, slew_e, abs_target_d)
         return pan_correction_rads
 
     # ------------------------------------------------------------------
@@ -711,12 +706,6 @@ class DroneController:
             self._mav.send_zero_velocity()
             return 0.0
 
-        # Compute following velocity from EKF state.
-        vN, vE = self._compute_follow_velocity(dt)
-        if vN is None:
-            self._mav.send_zero_velocity()
-            return 0.0
-
         pan_correction_rads = self._compute_yaw_correction(gimbal_pan_deg)
 
         if not self._ekf.is_valid or not self._origin_set:
@@ -742,19 +731,67 @@ class DroneController:
         target_pN = pN - math.cos(bearing) * self._s.follow_standoff_m
         target_pE = pE - math.sin(bearing) * self._s.follow_standoff_m
         target_pD = -(self._s.follow_altitude_m)
+        slew_n, slew_e = self._slew_position_target(
+            target_pN, target_pE, dt,
+            seed_n=drone_pN, seed_e=drone_pE,
+        )
 
         # Skip geofence / home-keepout checks — not meaningful on a bench.
 
         # TX is suppressed by the client in ground-test; this call logs [DRY-RUN].
-        self._mav.send_position_velocity_ned(
-            target_pN, target_pE, target_pD,
-            vN, vE, 0.0,
-        )
+        self._mav.send_position_ned(slew_n, slew_e, target_pD)
         return pan_correction_rads
 
     # ------------------------------------------------------------------
     #  Command target safety checks
     # ------------------------------------------------------------------
+
+    def _slew_position_target(
+        self,
+        target_n: float,
+        target_e: float,
+        dt: float,
+        *,
+        seed_n: float | None = None,
+        seed_e: float | None = None,
+    ) -> tuple[float, float]:
+        """Rate-limit the standoff target position to prevent EKF-jump lurches.
+
+        On first call after a reset the slewed target is seeded from the
+        current drone LOCAL_NED position when available. That prevents the
+        very first position-only setpoint from jumping straight to a faraway
+        camera/EKF estimate.
+        Subsequently it moves at most MAX_TRACKING_SPEED_MS per second toward
+        the true (GPS-computed) standoff target.
+
+        This stops a wrong detection or re-ID swap from instantly teleporting
+        the target 10+ metres and making the drone lurch across the sky.
+        The position target eventually reaches the correct standoff once
+        the EKF settles, at the same rate the drone can actually travel.
+        """
+        if not self._slew_init:
+            self._slew_tN = (
+                seed_n if seed_n is not None and math.isfinite(seed_n)
+                else target_n
+            )
+            self._slew_tE = (
+                seed_e if seed_e is not None and math.isfinite(seed_e)
+                else target_e
+            )
+            self._slew_init = True
+
+        max_step = self._s.max_tracking_speed_ms * max(dt, 1e-3)
+        dn = target_n - self._slew_tN
+        de = target_e - self._slew_tE
+        dist = math.hypot(dn, de)
+        if dist <= max_step or dist == 0.0:
+            self._slew_tN = target_n
+            self._slew_tE = target_e
+        else:
+            scale = max_step / dist
+            self._slew_tN += dn * scale
+            self._slew_tE += de * scale
+        return self._slew_tN, self._slew_tE
 
     def _update_bearing(
         self,
@@ -908,8 +945,14 @@ class DroneController:
             # they actually are, causing the drone to over-pursue.
             if y2 >= frame_h - 5:
                 return False
-            # Also skip if any edge is clipped (person partly out of frame)
-            if x1 <= 2 or x2 >= frame_w - 2 or y1 <= 2:
+            # Reject only when the bbox CENTRE is off-screen — the projection
+            # uses px=(x1+x2)/2 for azimuth and py=y2 for distance.  The old
+            # per-edge check (x1<=2, x2>=w-2, y1<=2) fired whenever the person
+            # approached either side of the frame, blocking all EKF updates and
+            # causing the drone to stall on its last heading instead of turning.
+            # y1 clipping is irrelevant: only py=y2 (feet) matters for distance.
+            cx = (x1 + x2) / 2.0
+            if cx <= 5.0 or cx >= frame_w - 5.0:
                 return False
 
             result = self._geo.project(
@@ -1161,7 +1204,14 @@ class DroneController:
         self._last_person_sep_m = None
         self._last_vertical_clearance_m = None
         self._vel_above_t   = -1.0
-        self._bearing_init  = False
+        self._slew_init     = False   # re-seed slew target from first valid standoff
+        # Do NOT reset _bearing_init here.  Keeping the last slew-limited
+        # bearing allows the 30°/s slew rate limiter to handle re-acquisition
+        # transitions gradually.  Resetting to False would bypass slew on the
+        # first _update_bearing() call after re-acquire, instantly snapping
+        # to the new drone→person angle and sending the standoff target
+        # teleporting — the source of the unexpected 180° body turns seen in
+        # flight logs (to_target > person_dist is the telltale signature).
         # Preserve session timer across reset() — it only resets when FCU disarms.
         # This prevents the operator bypassing the 10-min cap via unfollow+follow.
         self._rc_loss_loiter_issued = False
