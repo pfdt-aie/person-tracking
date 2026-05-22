@@ -225,10 +225,10 @@ def test_visual_reacquire_does_not_full_reset_follow_state():
 
     c.on_target_reacquired()
 
-    # EKF not reset (on_target_reacquired is lightweight)
+    # EKF not reset, session state preserved, failsafe flags cleared
     assert c._session_start_t == 123.0
     assert c._retreating is True
     assert c._bearing_init is True
     assert c._ekf.reset_count == 0
-    assert c._ema_vn == 0.4
-    assert c._ema_ve == -0.2
+    assert c._loiter_issued is False
+    assert c._alert_issued  is False
