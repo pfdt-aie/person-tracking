@@ -824,9 +824,23 @@ class DroneController:
             desired = self._bearing_rad if self._bearing_init else 0.0
 
         if not self._bearing_init:
-            self._bearing_rad = desired
+            # Seed _bearing_rad from the drone's actual current heading, NOT from
+            # the person direction.  Without this, the first yaw command is
+            # yaw = atan2(de, dn) (could be any angle), causing ArduPilot to
+            # immediately rotate the drone to face the person — this is the
+            # visible turn that happens right after 'follow' is typed.
+            # Seeding from get_attitude() means the first command is
+            # yaw = current_heading (no immediate rotation), and the 30°/s slew
+            # limiter governs how fast it rotates toward the person from there.
+            try:
+                _, _, drone_yaw = self._mav.get_attitude()
+            except (AttributeError, TypeError):
+                # MAVLink not yet connected or unit-test stub without _mav:
+                # fall back to desired so behaviour is correct in both cases.
+                drone_yaw = desired
+            self._bearing_rad = drone_yaw
             self._bearing_init = True
-            return desired
+            # Fall through to slew code — rotates toward desired at 30°/s
 
         # Shortest signed angular difference, clamped to slew limit.
         diff = (desired - self._bearing_rad + math.pi) % (2 * math.pi) - math.pi
